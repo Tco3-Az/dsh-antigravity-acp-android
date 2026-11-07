@@ -79,20 +79,20 @@ test('ARM64 binary patcher synthetic ELF test', () => {
   assert.equal(buf.readUInt32LE(offsetMovX8Canonical), 0xd2800608 >>> 0, 'Canonical mov x8, #439 -> mov x8, #48');
 
   // TCMalloc constants rewritten to 39-bit layout
-  assert.equal(buf.readBigUInt64LE(offsetMask48), 0x3800000000n, '0x1c0000000000 -> 0x3800000000');
-  assert.equal(buf.readBigUInt64LE(offsetFree48), 0x0800000000n, '0x040000000000 -> 0x0800000000');
+  assert.equal(buf.readBigUInt64LE(offsetMask48), 0x38000000000n, '0x1c0000000000 -> 0x38000000000');
+  assert.equal(buf.readBigUInt64LE(offsetFree48), 0x008000000000n, '0x040000000000 -> 0x008000000000');
   assert.equal(buf.readUInt32LE(offsetMmap), 0xd3596129 >>> 0, 'MmapAligned 1<<48 -> 1<<39');
   assert.equal(buf.readUInt32LE(offsetAndPair), 0x92409508 >>> 0, '47-bit addr mask -> 38-bit addr mask');
-  assert.equal(buf.readUInt32LE(offsetAndPair + 4), 0x925af109 >>> 0, '~(7<<42) -> ~(7<<35)');
-  assert.equal(buf.readUInt32LE(offsetMovzTag), 0xd2c00409 >>> 0, '4<<42 -> 4<<35');
+  assert.equal(buf.readUInt32LE(offsetAndPair + 4), 0x9256f109 >>> 0, '~(7<<42) -> ~(7<<39)');
+  assert.equal(buf.readUInt32LE(offsetMovzTag), 0xd2c04009 >>> 0, '4<<42 -> 4<<39');
 
-  // TCMalloc ubfx rewritten to shift 35
+  // TCMalloc ubfx rewritten to shift 39
   const ubfxPatched = buf.readUInt32LE(offsetUbfx);
-  assert.equal((ubfxPatched & 0xfffffc00) >>> 0, 0xd3639400 >>> 0, 'ubfx #42, #3 -> ubfx #35, #3');
+  assert.equal((ubfxPatched & 0xfffffc00) >>> 0, 0xd367a400 >>> 0, 'ubfx #42, #3 -> ubfx #39, #3');
 
-  // TCMalloc lsl rewritten to shift 35
+  // TCMalloc lsl rewritten to shift 39
   const lslPatched = buf.readUInt32LE(offsetLsl);
-  assert.equal((lslPatched & 0xfffffc00) >>> 0, 0xd35d7000 >>> 0, 'lsl #42 -> lsl #35');
+  assert.equal((lslPatched & 0xfffffc00) >>> 0, 0xd3596000 >>> 0, 'lsl #42 -> lsl #39');
 
   // Verify zero collateral damage on all other offsets
   const targetRanges = [

@@ -71,6 +71,8 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.4.0",
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-subprocess": "0.2.2-rc.1",
     "@deepseek-ai/schemastery": "3.18.4",
     "@modelcontextprotocol/sdk": "1.32.2",
     "ajv": "8.20.0",
