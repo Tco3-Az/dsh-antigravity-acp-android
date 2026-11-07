@@ -1,10 +1,30 @@
 import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { LlmError } from '@deepseek-ai/dsh-llm';
 import type { SubprocessHandle, SubprocessRuntime } from '@deepseek-ai/dsh-subprocess';
 import type { Config } from '../config.js';
 import { ensureOfficialServer } from './installer.js';
 import { validateAndFormatServerArgs } from '../acp-runner.js';
+import { patchExecutableFile } from '../binary-patcher.js';
+
+const patchedCache = new Set<string>();
+
+async function ensurePatchedOnArm64Linux(resolvedCommand: string): Promise<void> {
+  if (process.platform !== 'linux' || process.arch !== 'arm64') return;
+  if (patchedCache.has(resolvedCommand)) return;
+  try {
+    await patchExecutableFile(resolvedCommand);
+  } catch {
+    // Non-ELF or read-only script wrapper; ignore
+  }
+  try {
+    const companion = join(dirname(resolvedCommand), 'localharness_external');
+    await patchExecutableFile(companion);
+  } catch {
+    // Companion binary optional
+  }
+  patchedCache.add(resolvedCommand);
+}
 
 export async function resolveCommand(
   config: Config,
@@ -28,7 +48,9 @@ export async function resolveCommand(
   for (const command of candidates) {
     signal?.throwIfAborted();
     try {
-      return await runtime.resolveExecutable(command, undefined, signal);
+      const resolved = await runtime.resolveExecutable(command, undefined, signal);
+      await ensurePatchedOnArm64Linux(resolved);
+      return resolved;
     } catch {
       signal?.throwIfAborted();
     }
@@ -40,7 +62,9 @@ export async function resolveCommand(
       timeoutMs: config.installTimeoutMs,
       notify,
     });
-    return runtime.resolveExecutable(command, undefined, signal);
+    const resolved = await runtime.resolveExecutable(command, undefined, signal);
+    await ensurePatchedOnArm64Linux(resolved);
+    return resolved;
   }
   throw new LlmError(
     'Official Antigravity ACP binary was not found. Remove an invalid command override or enable automatic installation, then retry in DSH.',

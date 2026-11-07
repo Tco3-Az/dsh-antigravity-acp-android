@@ -15,8 +15,19 @@ import { buildPrompt } from './prompt.js';
 import type { Config } from './config.js';
 import { ToolSessions } from './mcp/sessions.js';
 import type { AcpGenerateOptions as GenerateOptions } from './request.js';
-import type { AndroidOAuthManager } from './android-oauth.js';
+import { oauthManager, type AndroidOAuthManager } from './android-oauth.js';
 
+/**
+ * DSH 0.2.1-rc.3 requires every model entry to declare reasoning metadata
+ * before a request carrying a `reasoningEffort` is accepted; without it the
+ * host throws UNSUPPORTED_REASONING_EFFORT for any effort, including `off`.
+ *
+ * Antigravity encodes the thinking level into the model ID suffix
+ * (`-low` / `-medium` / `-high`) and this adapter never consumes
+ * `options.reasoningEffort`, so a full host-neutral effort list is declared
+ * purely to satisfy the host contract. See
+ * https://github.com/dannndouglas/dsh-antigravity-acp/issues/1
+ */
 const REASONING_META = {
   efforts: [
     { id: ReasoningEffortId('off'), name: 'Off' },
@@ -41,22 +52,19 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     readonly config: Config,
     private runtime: SubprocessRuntime,
     private warn: (message: string) => void = () => {},
+    private oauth: AndroidOAuthManager = oauthManager,
   ) {
     super();
-    this.controlClient = new AcpClient(config, runtime, warn);
-    this.tools = new ToolSessions(config, runtime, warn);
+    this.controlClient = new AcpClient(config, runtime, warn, oauth);
+    this.tools = new ToolSessions(config, runtime, warn, oauth);
   }
 
   get client(): AcpClient {
     return this.controlClient;
   }
 
-  get oauthManager(): AndroidOAuthManager {
-    return this.controlClient.oauthManager;
-  }
-
   providerInfo(provider: string) {
-    return { id: provider, name: 'Antigravity (official ACP Android)' };
+    return { id: provider, name: 'Antigravity (official ACP)' };
   }
 
   private async acquire(signal?: AbortSignal): Promise<() => void> {
@@ -98,7 +106,7 @@ export class AntigravityAcpAdapter extends LlmAdapter {
             this.client.initializeResult?.agentCapabilities?.mcpCapabilities?.http
           ) {
             const ready = this.controlClient;
-            this.controlClient = new AcpClient(this.config, this.runtime, this.warn);
+            this.controlClient = new AcpClient(this.config, this.runtime, this.warn, this.oauth);
             await this.tools.acceptReadyClient(ready);
           }
         } catch (error) {
@@ -121,7 +129,7 @@ export class AntigravityAcpAdapter extends LlmAdapter {
         ...m,
         provider,
         inputModalities: ['text'],
-        description: 'Official ACP backend with DSH tools through MCP on Android',
+        description: 'Official ACP backend with DSH tools through MCP',
         reasoning: REASONING_META,
       }));
     } finally {
@@ -152,7 +160,6 @@ export class AntigravityAcpAdapter extends LlmAdapter {
       generations: this.generations + this.tools.generations,
       activeToolSessions: this.tools.active,
       idleToolProcesses: this.tools.idle,
-      oauth: this.oauthManager.getState(),
     };
   }
 
@@ -167,7 +174,7 @@ export class AntigravityAcpAdapter extends LlmAdapter {
       yield* this.tools.stream(options);
       return;
     }
-    const prompt = buildPrompt(options, this.config);
+    const prompt = buildPrompt(options, this.config); // Validate before spawning or authenticating.
     const release = await this.acquire(options.signal);
     const borrowed = this.tools.borrowReadyClient();
     const client = borrowed ?? this.client;
@@ -201,55 +208,77 @@ export class AntigravityAcpAdapter extends LlmAdapter {
       };
       client.onPermission = nativeTools;
       client.onUpdate = (event) => {
-        if (event.sessionId !== sessionId) return;
-        for (const chunk of mapper.map(event)) queue.push(chunk);
+        if (event.sessionId !== sessionId || done) return;
+        if (
+          event.update.sessionUpdate === 'tool_call' ||
+          event.update.sessionUpdate === 'tool_call_update'
+        ) {
+          nativeTools();
+          return;
+        }
+        queue.push(...mapper.update(event.update));
         wake?.();
       };
-      const cancelTurn = (reason: string) => {
-        if (!promptStarted || completed || !sessionId || !client.connected) return;
-        void client.connection!.agent
-          .notify(methods.agent.session.cancel, { sessionId })
-          .catch(() => {});
-        this.warn(`Antigravity prompt cancelled (${reason}).`);
-      };
-      options.signal?.addEventListener('abort', () => cancelTurn('client abort'), { once: true });
-      this.lifetime.signal.addEventListener('abort', () => cancelTurn('adapter disposed'), {
-        once: true,
-      });
-      const promptPromise = (async () => {
-        try {
-          promptStarted = true;
-          const result = await client.connection!.agent.request(
-            methods.agent.session.prompt,
-            { sessionId: session.sessionId, prompt },
-          );
-          completed = true;
-          queue.push({ finishReason: finishReason(result.stopReason) });
-        } catch (err) {
-          error = err;
-        } finally {
+      let stop = '';
+      promptStarted = true;
+      const pending = client.prompt(sessionId, prompt, options.signal).then(
+        (result) => {
+          stop = result.stopReason;
           done = true;
           wake?.();
-        }
-      })();
+        },
+        (failure) => {
+          error = failure;
+          done = true;
+          wake?.();
+        },
+      );
       while (!done || queue.length) {
-        while (queue.length) yield queue.shift()!;
-        if (done) break;
-        await new Promise<void>((r) => (wake = r));
-        wake = undefined;
+        while (queue.length) {
+          if (options.signal?.aborted) throw aborted();
+          yield queue.shift()!;
+        }
+        if (!done)
+          await new Promise<void>((resolve) => {
+            wake = resolve;
+          });
       }
-      await promptPromise;
       if (error) throw error;
+      await pending;
+      if (options.signal?.aborted) throw aborted();
+      if (!mapper.hasText && stop === 'end_turn')
+        throw new LlmError(
+          'Official ACP server ended the turn without assistant text.',
+          'EMPTY_RESPONSE',
+        );
+      yield* mapper.end();
+      // ACP usage_update reports current context occupancy, not per-call token billing.
+      completed = stop === 'end_turn';
+      yield { type: 'finish', reason: finishReason(stop) };
+    } catch (failure) {
+      throw options.signal?.aborted ? aborted() : classify(failure);
     } finally {
-      client.onPermission = undefined;
       client.onUpdate = undefined;
-      release();
+      client.onPermission = undefined;
+      try {
+        if (completed && !options.signal?.aborted && borrowed)
+          await this.tools.acceptReadyClient(client);
+        else if (!completed || options.signal?.aborted)
+          await client.cancelAndReset(promptStarted ? sessionId : undefined);
+      } finally {
+        try {
+          if (borrowed && (!completed || options.signal?.aborted))
+            await this.tools.discardReadyClient(client);
+        } finally {
+          release();
+        }
+      }
     }
   }
 
   async dispose(): Promise<void> {
     this.disposed = true;
     this.lifetime.abort();
-    await Promise.allSettled([this.controlClient.dispose(), this.tools.dispose()]);
+    await Promise.all([this.client.dispose(), this.tools.dispose()]);
   }
 }

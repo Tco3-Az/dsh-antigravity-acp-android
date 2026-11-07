@@ -14,6 +14,7 @@ import { buildPrompt } from '../prompt.js';
 import type { Config } from '../config.js';
 import { DshMcpBridge } from './bridge.js';
 import type { AcpGenerateOptions as GenerateOptions } from '../request.js';
+import type { AndroidOAuthManager } from '../android-oauth.js';
 
 interface Pending {
   call: ToolCallBlock;
@@ -86,6 +87,7 @@ export class ToolSessions {
     private config: Config,
     private runtime: SubprocessRuntime,
     private notify: (message: string) => void,
+    private oauthManager?: AndroidOAuthManager,
   ) {}
   get active(): number {
     return this.bindings.size;
@@ -128,7 +130,8 @@ export class ToolSessions {
   }
   private takeClient(): AcpClient {
     const client =
-      this.borrowReadyClient() ?? new AcpClient(this.config, this.runtime, this.notify);
+      this.borrowReadyClient() ??
+      new AcpClient(this.config, this.runtime, this.notify, this.oauthManager);
     this.borrowedClients.delete(client); // An active Binding takes ownership synchronously.
     return client;
   }

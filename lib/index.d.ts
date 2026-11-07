@@ -1,0 +1,11 @@
+import { stripView, unauthCardView, connectedCardView } from './ui.js';
+import { AndroidOAuthManager } from './android-oauth.js';
+import { patchArm64Binary, patchExecutableFile, ensurePatchedServer } from './binary-patcher.js';
+import { validateAndFormatServerArgs, prepareRunnerEnv, createStdoutJsonFilter, DEFAULT_HANDSHAKE_TIMEOUT_MS } from './acp-runner.js';
+import type { Config } from './config.js';
+import type { AntigravityAcpAdapter } from './adapter.js';
+export declare const name = "llm-antigravity-acp";
+export declare const inject: string[];
+export type { Config, AntigravityAcpAdapter };
+export { AndroidOAuthManager, patchArm64Binary, patchExecutableFile, ensurePatchedServer, validateAndFormatServerArgs, prepareRunnerEnv, createStdoutJsonFilter, DEFAULT_HANDSHAKE_TIMEOUT_MS, stripView, unauthCardView, connectedCardView, };
+export declare function apply(ctx: any, config?: Partial<Config>): Promise<void>;

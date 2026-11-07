@@ -1,0 +1,37 @@
+import { type InitializeResponse, type NewSessionResponse, type SessionNotification, type PromptResponse, type McpServer, type RequestPermissionRequest, type RequestPermissionResponse } from '@agentclientprotocol/sdk';
+import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess';
+import type { Config } from '../config.js';
+import { type AndroidOAuthManager } from '../android-oauth.js';
+/** One process per adapter, serialized by the adapter. No credentials or history are persisted here. */
+export declare class AcpClient {
+    readonly config: Config;
+    readonly runtime: SubprocessRuntime;
+    private notify;
+    private oauth;
+    private connection?;
+    private child?;
+    private cwd?;
+    private stopping?;
+    private sessionCount;
+    private unusedSession?;
+    private disposed;
+    initializeResult?: InitializeResponse;
+    processStarts: number;
+    authentications: number;
+    onUpdate?: (event: SessionNotification) => void;
+    onPermission?: (request: RequestPermissionRequest) => void | RequestPermissionResponse;
+    constructor(config: Config, runtime: SubprocessRuntime, notify?: (message: string) => void, oauth?: AndroidOAuthManager);
+    get connected(): boolean;
+    private bounded;
+    start(signal?: AbortSignal): Promise<void>;
+    login(signal?: AbortSignal): Promise<void>;
+    newSession(signal?: AbortSignal, authenticate?: boolean, mcpServers?: McpServer[]): Promise<NewSessionResponse>;
+    /** Claim a still-empty discovery session once. Sessions with MCP or prior prompts are excluded. */
+    takeUnusedSession(): NewSessionResponse | undefined;
+    selectModel(session: NewSessionResponse, model: string, signal?: AbortSignal): Promise<void>;
+    prompt(sessionId: string, text: string, signal?: AbortSignal, timeoutMs?: number): Promise<PromptResponse>;
+    logout(signal?: AbortSignal): Promise<void>;
+    cancelAndReset(sessionId?: string): Promise<void>;
+    reset(): Promise<void>;
+    dispose(): Promise<void>;
+}

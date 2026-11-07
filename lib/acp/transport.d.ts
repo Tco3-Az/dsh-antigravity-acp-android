@@ -1,0 +1,4 @@
+import { Readable, Writable } from 'node:stream';
+import { type ClientConnection, type SessionNotification, type RequestPermissionRequest, type RequestPermissionResponse } from '@agentclientprotocol/sdk';
+/** The same SDK framing/correlation/validation with stdout noise filter for Android/PRoot. */
+export declare function connectTransport(input: Readable, output: Writable, onUpdate: (event: SessionNotification) => void, onPermission: (request: RequestPermissionRequest) => void | RequestPermissionResponse): ClientConnection;

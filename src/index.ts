@@ -1,17 +1,21 @@
 import { stripView, unauthCardView, connectedCardView } from './ui.js';
 import { AndroidOAuthManager } from './android-oauth.js';
 import { patchArm64Binary, patchExecutableFile, ensurePatchedServer } from './binary-patcher.js';
-import { validateAndFormatServerArgs, prepareRunnerEnv, createStdoutJsonFilter, DEFAULT_HANDSHAKE_TIMEOUT_MS } from './acp-runner.js';
-import { Config, resolveConfig } from './config.js';
-import { AntigravityAcpAdapter } from './adapter.js';
+import {
+  validateAndFormatServerArgs,
+  prepareRunnerEnv,
+  createStdoutJsonFilter,
+  DEFAULT_HANDSHAKE_TIMEOUT_MS,
+} from './acp-runner.js';
+import type { Config } from './config.js';
+import type { AntigravityAcpAdapter } from './adapter.js';
 
 export const name = 'llm-antigravity-acp';
 export const inject = ['llm', 'subprocess'];
 
+export type { Config, AntigravityAcpAdapter };
+
 export {
-  Config,
-  resolveConfig,
-  AntigravityAcpAdapter,
   AndroidOAuthManager,
   patchArm64Binary,
   patchExecutableFile,
@@ -25,26 +29,30 @@ export {
   connectedCardView,
 };
 
-export function apply(ctx: any, config: any = {}): void {
+export async function apply(ctx: any, config: Partial<Config> = {}): Promise<void> {
+  const oauthManager = new AndroidOAuthManager();
   let adapter: AntigravityAcpAdapter | undefined;
-  let sharedOAuth: AndroidOAuthManager | undefined;
 
   // 1. DSH core LLM provider registration (when running inside DSH core)
   if (ctx.llm && ctx.subprocess) {
     try {
+      const [{ resolveConfig }, { AntigravityAcpAdapter: AdapterClass }] = await Promise.all([
+        import('./config.js'),
+        import('./adapter.js'),
+      ]);
       const resolved = resolveConfig(config);
-      adapter = new AntigravityAcpAdapter(resolved, ctx.subprocess, (message) =>
-        ctx.logger?.warn?.(message) ?? console.warn(message),
+      adapter = new AdapterClass(
+        resolved,
+        ctx.subprocess,
+        (message: string) => ctx.logger?.warn?.(message) ?? console.warn(message),
+        oauthManager,
       );
-      ctx.llm.registerAdapter([resolved.provider], adapter);
+      ctx.llm.registerAdapter?.([resolved.provider], adapter);
       ctx.effect?.(() => () => adapter?.dispose());
-      sharedOAuth = adapter.oauthManager;
-    } catch {
-      // Fallback if config resolution fails in stubbed environments
+    } catch (err) {
+      ctx.logger?.warn?.(`AntigravityAcpAdapter initialization fallback: ${String(err)}`);
     }
   }
-
-  const oauthManager = sharedOAuth ?? new AndroidOAuthManager();
 
   // 2. DSH Go Android Native UI Bridge registration
   // Must use ctx.inject(['dshGo'], callback) - NOT top-level inject
@@ -52,51 +60,94 @@ export function apply(ctx: any, config: any = {}): void {
     const dshGo = subCtx.dshGo;
     if (!dshGo) return;
 
-    // Register composer strip
+    // Register composer strip with live state subscription
     dshGo.strip('acp-strip', (_scope: any, emit: any, caps: any) => {
-      const state = oauthManager.getState();
-      const isAuth = state.status === 'authenticated';
-      emit(stripView({ authorized: isAuth }, caps?.locale ?? 'zh'));
-      return () => {};
+      const locale = caps?.locale ?? 'zh';
+      const push = () => {
+        const state = oauthManager.getState();
+        emit(stripView({ authorized: state.status === 'authenticated' }, locale));
+      };
+      push();
+      return oauthManager.onStateChange(() => push());
     });
 
-    // Register panel
+    // Register panel with v2 form/collapsible support and live state subscription
     dshGo.panel('acp-panel', {
       view: (_scope: any, caps: any) => {
         const state = oauthManager.getState();
+        const lang = caps?.locale ?? 'zh';
         if (state.status === 'authenticated') {
-          return connectedCardView({ lang: caps?.locale ?? 'zh' });
+          return connectedCardView({
+            lang,
+            model: config?.defaultModel || 'server-default',
+          });
         }
-        return unauthCardView({ lang: caps?.locale ?? 'zh', authUrl: state.authUrl });
+        return unauthCardView({
+          lang,
+          authUrl: state.authUrl,
+          components: caps?.components,
+        });
       },
       data: (_scope: any, emit: any, caps: any) => {
-        const state = oauthManager.getState();
-        emit({
-          authenticated: state.status === 'authenticated',
-          authUrl: state.authUrl ?? null,
-          locale: caps?.locale ?? 'zh',
-        });
-        return () => {};
+        const locale = caps?.locale ?? 'zh';
+        let lastAuth = oauthManager.getState().status === 'authenticated';
+        const push = () => {
+          const state = oauthManager.getState();
+          const isAuth = state.status === 'authenticated';
+          emit({
+            authenticated: isAuth,
+            authUrl: state.authUrl ?? '',
+            callbackUrl: '',
+            locale,
+          });
+          if (isAuth !== lastAuth) {
+            lastAuth = isAuth;
+            dshGo.refresh?.('acp-panel');
+          }
+        };
+        push();
+        return oauthManager.onStateChange(() => push());
       },
       actions: {
-        'launch-browser': (_scope: any) => {
-          const state = oauthManager.getState();
-          if (state.authUrl) {
-            return { type: 'open', url: state.authUrl };
+        'launch-browser': async (_scope: any, event: any) => {
+          const isEn = String(event?.locale ?? '').startsWith('en');
+          let state = oauthManager.getState();
+          if (!state.authUrl && adapter) {
+            void adapter.client.login().catch(() => {});
+            await oauthManager.waitForAuthUrl(2500);
+            state = oauthManager.getState();
           }
-          return { toast: '暂无授权链接，请重新发起' };
+          if (state.authUrl) {
+            return { type: 'link', url: state.authUrl };
+          }
+          return {
+            type: 'toast',
+            text: isEn ? 'No auth link yet, start a session first' : '暂无授权链接，请先发起会话',
+          };
         },
         'paste-callback': async (_scope: any, event: any) => {
-          const callbackUrl = event?.value?.url ?? event?.value;
-          if (typeof callbackUrl === 'string' && callbackUrl.trim()) {
+          const isEn = String(event?.locale ?? '').startsWith('en');
+          const rawVal =
+            event?.value?.values?.['data.callbackUrl'] ??
+            event?.value?.callbackUrl ??
+            event?.value?.url ??
+            event?.value;
+          if (typeof rawVal === 'string' && rawVal.trim()) {
             try {
-              const res = await oauthManager.relayLoopbackCallback(callbackUrl.trim());
-              return { toast: res.message };
+              const res = await oauthManager.relayLoopbackCallback(rawVal.trim());
+              return [
+                { type: 'patch', data: { authenticated: res.ok, callbackUrl: '' } },
+                { type: 'refresh', id: 'acp-panel' },
+                { type: 'toast', text: res.message },
+              ];
             } catch (err: any) {
-              return { toast: String(err?.message ?? err) };
+              return { type: 'toast', text: String(err?.message ?? err) };
             }
           }
-          return { toast: '请提供完整的回调链接' };
+          return {
+            type: 'toast',
+            text: isEn ? 'Paste the full callback URL' : '请粘贴完整的回调链接',
+          };
         },
       },
     });

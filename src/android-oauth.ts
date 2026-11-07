@@ -20,6 +20,7 @@ export interface AndroidOAuthOptions {
 export class AndroidOAuthManager {
   private state: OAuthSessionState = { status: 'idle' };
   private onOAuthUrlListener?: (url: string, loopbackPort?: number, state?: string) => void;
+  private stateListeners = new Set<(state: OAuthSessionState) => void>();
   private amStartLauncher: (url: string) => Promise<boolean> | boolean;
   private fetchFn: typeof globalThis.fetch;
 
@@ -33,12 +34,45 @@ export class AndroidOAuthManager {
     return { ...this.state };
   }
 
+  onStateChange(listener: (state: OAuthSessionState) => void): () => void {
+    this.stateListeners.add(listener);
+    return () => {
+      this.stateListeners.delete(listener);
+    };
+  }
+
+  private emitState(): void {
+    const snapshot = this.getState();
+    for (const listener of this.stateListeners) {
+      try {
+        listener(snapshot);
+      } catch {
+        // Ignore listener errors
+      }
+    }
+  }
+
+  markAuthenticated(): void {
+    if (this.state.status !== 'authenticated') {
+      this.state = {
+        ...this.state,
+        status: 'authenticated',
+        error: undefined,
+      };
+      this.emitState();
+    }
+  }
+
   private async defaultAmStart(url: string): Promise<boolean> {
     return new Promise((resolve) => {
       try {
-        const child = spawn('/system/bin/am', ['start', '-a', 'android.intent.action.VIEW', '-d', url], {
-          stdio: 'ignore',
-        });
+        const child = spawn(
+          '/system/bin/am',
+          ['start', '-a', 'android.intent.action.VIEW', '-d', url],
+          {
+            stdio: 'ignore',
+          },
+        );
         child.on('error', () => resolve(false));
         child.on('close', (code) => resolve(code === 0));
       } catch {
@@ -82,11 +116,32 @@ export class AndroidOAuthManager {
     }
 
     this.onOAuthUrlListener?.(url, loopbackPort, expectedState);
+    this.emitState();
     return url;
   }
 
+  waitForAuthUrl(timeoutMs = 15000): Promise<string | undefined> {
+    if (this.state.authUrl) return Promise.resolve(this.state.authUrl);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        unsubscribe();
+        resolve(this.state.authUrl);
+      }, timeoutMs);
+      timer.unref?.();
+      const unsubscribe = this.onStateChange((s) => {
+        if (s.authUrl) {
+          clearTimeout(timer);
+          unsubscribe();
+          resolve(s.authUrl);
+        }
+      });
+    });
+  }
+
   // Level 3: Manual Loopback Callback Relay
-  async relayLoopbackCallback(callbackUrl: string): Promise<{ ok: boolean; status: number; message: string }> {
+  async relayLoopbackCallback(
+    callbackUrl: string,
+  ): Promise<{ ok: boolean; status: number; message: string }> {
     let parsed: URL;
     try {
       parsed = new URL(callbackUrl);
@@ -105,7 +160,9 @@ export class AndroidOAuthManager {
 
     const port = Number(parsed.port);
     if (this.state.loopbackPort && port && port !== this.state.loopbackPort) {
-      throw new Error(`回调端口 ${port} 与当前服务器监听端口 ${this.state.loopbackPort} 不符`);
+      throw new Error(
+        `回调端口 ${port} 与当前服务器监听端口 ${this.state.loopbackPort} 不符`,
+      );
     }
 
     const stateParam = parsed.searchParams.get('state');
@@ -119,7 +176,9 @@ export class AndroidOAuthManager {
         redirect: 'follow',
       });
 
-      this.state.status = 'authenticated';
+      if (response.ok) {
+        this.markAuthenticated();
+      }
       return {
         ok: response.ok,
         status: response.status,
@@ -131,3 +190,6 @@ export class AndroidOAuthManager {
     }
   }
 }
+
+export const oauthManager = new AndroidOAuthManager();
+
