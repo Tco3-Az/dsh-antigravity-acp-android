@@ -18,10 +18,10 @@ import { setTimeout as delay } from 'node:timers/promises';
 import * as yauzl from 'yauzl';
 import { LlmError } from '@deepseek-ai/dsh-llm';
 import { aborted } from './errors.js';
+import { patchExecutableFile } from '../binary-patcher.js';
 
-// URLs pinned to the official ACP Registry's 1.3.0 distribution. No mirror,
-// update feed or third-party download can choose executable code at runtime.
 export const SERVER_VERSION = '1.3.0';
+
 export function distribution(platform = process.platform as string, arch = process.arch as string) {
   const os = { win32: 'windows', darwin: 'macos', linux: 'linux' }[platform];
   const cpu = { x64: 'x86_64', arm64: 'arm64' }[arch];
@@ -37,16 +37,17 @@ export function distribution(platform = process.platform as string, arch = proce
     url: `https://dl.google.com/agy-extensions/releases/${os}/agy-acp-server-${SERVER_VERSION}-${label}-${cpu}.zip`,
   };
 }
+
 export interface InstallOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
   notify?: (message: string) => void;
-  // Dependency seams for offline tests. Plugin configuration cannot set a URL.
   cacheRoot?: string;
   platform?: string;
   arch?: string;
   fetch?: (url: string, init?: RequestInit) => Promise<Response>;
 }
+
 function safeName(name: string): boolean {
   return (
     !!name &&
@@ -65,7 +66,9 @@ function safeName(name: string): boolean {
       )
   );
 }
+
 type FileRecord = { name: string; size: number };
+
 async function publicationLock(path: string, signal: AbortSignal): Promise<() => Promise<void>> {
   for (;;) {
     signal.throwIfAborted();
@@ -96,6 +99,7 @@ async function publicationLock(path: string, signal: AbortSignal): Promise<() =>
     }
   }
 }
+
 async function ready(directory: string, command: string): Promise<boolean> {
   try {
     if (!(await lstat(directory)).isDirectory() || (await lstat(directory)).isSymbolicLink())
@@ -176,7 +180,7 @@ async function unpack(
             );
             await pipeline(
               stream,
-              createWriteStream(path, { flags: 'wx', mode: mode & 0o111 ? 0o700 : 0o600 }),
+              createWriteStream(path, { flags: 'wx', mode: mode & 0o111 ? 0o755 : 0o644 }),
               { signal },
             );
             files.push({ name: entry.fileName, size: entry.uncompressedSize });
@@ -204,7 +208,7 @@ export async function ensureOfficialServer(options: InstallOptions = {}): Promis
     options.cacheRoot ??
       (process.env.DSH_HOME
         ? join(process.env.DSH_HOME, 'cache', 'antigravity-acp')
-        : join(homedir(), '.cache', 'dsh-antigravity-acp')),
+        : join(homedir(), '.local', 'opt', 'agy-acp', 'current')),
   );
   const directory = join(root, `${SERVER_VERSION}-${artifact.key}`);
   if (await ready(directory, artifact.command)) return join(directory, artifact.command);
@@ -215,7 +219,7 @@ export async function ensureOfficialServer(options: InstallOptions = {}): Promis
   let stage: string | undefined;
   try {
     signal.throwIfAborted();
-    await mkdir(root, { recursive: true, mode: 0o700 });
+    await mkdir(root, { recursive: true, mode: 0o755 });
     stage = await mkdtemp(join(root, '.install-'));
     const archive = join(stage, 'download.zip'),
       payload = join(stage, 'payload');
@@ -245,20 +249,43 @@ export async function ensureOfficialServer(options: InstallOptions = {}): Promis
       createWriteStream(archive, { flags: 'wx', mode: 0o600 }),
       { signal },
     );
-    await mkdir(payload, { mode: 0o700 });
+    await mkdir(payload, { mode: 0o755 });
     const files = await unpack(archive, payload, signal);
     if (!files.some((file) => file.name === artifact.command && file.size > 0))
       throw Error('missing server');
-    // The complete archive (including sibling helpers) is retained unmodified.
-    await chmod(join(payload, artifact.command), 0o700);
+
+    // ARM64 Linux / PRoot Android Binary Patching (TCMalloc VA39 + Syscall 439 faccessat2)
+    const serverPath = join(payload, artifact.command);
+    const helperPath = join(payload, 'localharness_external');
+
+    try {
+      await patchExecutableFile(serverPath);
+      await chmod(serverPath, 0o755);
+    } catch {
+      // Continue if non-ELF
+    }
+
+    try {
+      await patchExecutableFile(helperPath);
+      await chmod(helperPath, 0o755);
+    } catch {
+      // Helper might be optional on some platforms
+    }
+
+    // Refresh file records with post-patch file sizes
+    const updatedFiles: FileRecord[] = [];
+    for (const file of files) {
+      const s = await lstat(join(payload, file.name));
+      updatedFiles.push({ name: file.name, size: s.size });
+    }
+
     await writeFile(
       join(payload, '.dsh-ready.json'),
-      JSON.stringify({ version: SERVER_VERSION, files }),
-      { flag: 'wx', mode: 0o600 },
+      JSON.stringify({ version: SERVER_VERSION, files: updatedFiles }),
+      { flag: 'wx', mode: 0o644 },
     );
     signal.throwIfAborted();
-    // Short cross-process publication lock: no installer can quarantine another
-    // installer's freshly completed cache. Interrupted lock owners are detected.
+
     const unlock = await publicationLock(`${directory}.lock`, signal);
     try {
       if (!(await ready(directory, artifact.command))) {
@@ -282,7 +309,6 @@ export async function ensureOfficialServer(options: InstallOptions = {}): Promis
       'ACP_INSTALL_FAILED',
     );
   } finally {
-    // stage is created directly inside this installer-owned cache root.
     if (stage) await rm(stage, { recursive: true, force: true });
   }
 }

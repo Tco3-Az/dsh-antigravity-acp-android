@@ -8,7 +8,6 @@ import {
   type InitializeResponse,
   type NewSessionResponse,
   type SessionNotification,
-  type PromptResponse,
   type McpServer,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
@@ -18,9 +17,11 @@ import type { Config } from '../config.js';
 import { connectTransport } from './transport.js';
 import { disposeProcess, resolveCommand, serverArgs } from './process.js';
 import { aborted, classify } from './errors.js';
-import { modelOption, selectValues } from '../models.js';
+import { modelOption } from '../models.js';
+import { AndroidOAuthManager } from '../android-oauth.js';
+import { prepareRunnerEnv } from '../acp-runner.js';
 
-/** One process per adapter, serialized by the adapter. No credentials or history are persisted here. */
+/** One process per adapter, serialized by the adapter. Native Android PRoot support. */
 export class AcpClient {
   private connection?: ClientConnection;
   private child?: SubprocessHandle;
@@ -32,13 +33,16 @@ export class AcpClient {
   initializeResult?: InitializeResponse;
   processStarts = 0;
   authentications = 0;
+  readonly oauthManager = new AndroidOAuthManager();
   onUpdate?: (event: SessionNotification) => void;
   onPermission?: (request: RequestPermissionRequest) => void | RequestPermissionResponse;
+
   constructor(
     readonly config: Config,
     readonly runtime: SubprocessRuntime,
     private notify: (message: string) => void = () => {},
   ) {}
+
   get connected(): boolean {
     return !!this.connection && !this.connection.signal.aborted;
   }
@@ -89,19 +93,29 @@ export class AcpClient {
         throw aborted();
       }
       this.cwd = cwd;
+
+      // Spawn with PRoot environment isolation and shims
+      const env = prepareRunnerEnv(process.env);
       this.child = this.runtime.spawn({
         argv: [command, ...serverArgs(this.config, command)],
         cwd: this.cwd,
         stdio: { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' },
         graceMs: this.config.disposeGraceMs,
-        env: { PYTHONUNBUFFERED: '1' },
+        env: env as Record<string, string>,
       });
       this.processStarts++;
       const child = this.child;
       if (!child.stdin || !child.stdout)
         throw new LlmError('ACP subprocess did not expose stdio pipes.', 'ACP_DISCONNECTED');
-      // Drain without logging or retaining server diagnostics (may contain account/auth data).
-      child.stderr?.resume();
+
+      // Capture stderr to intercept OAuth URLs
+      child.stderr?.on('data', (chunk: Buffer) => {
+        const text = chunk.toString('utf8');
+        for (const line of text.split('\n')) {
+          this.oauthManager.handleStderrLine(line);
+        }
+      });
+
       const connection = connectTransport(
         child.stdout,
         child.stdin,
@@ -113,16 +127,19 @@ export class AcpClient {
         () => connection.close(),
         () => connection.close(),
       );
+
+      // Default handshake timeout (120s for mobile cold start)
+      const handshakeTimeout = this.config.handshakeTimeoutMs || 120000;
       const init = await this.bounded(
         connection.agent.request(methods.agent.initialize, {
           protocolVersion: 1,
-          clientInfo: { name: 'dsh-antigravity-acp', version: '0.3.5' },
+          clientInfo: { name: 'dsh-antigravity-acp', version: '0.4.0' },
           clientCapabilities: {
             fs: { readTextFile: false, writeTextFile: false },
             terminal: false,
           },
         }),
-        this.config.requestTimeoutMs,
+        handshakeTimeout,
         signal,
       );
       if (init.protocolVersion !== 1)
@@ -159,7 +176,6 @@ export class AcpClient {
     mcpServers: McpServer[] = [],
   ): Promise<NewSessionResponse> {
     this.unusedSession = undefined;
-    // ACP has no universal session disposal; periodically recycle between turns.
     if (this.sessionCount >= this.config.maxSessionsPerProcess) await this.reset();
     await this.start(signal);
     const create = () =>
@@ -185,7 +201,6 @@ export class AcpClient {
     return session;
   }
 
-  /** Claim a still-empty discovery session once. Sessions with MCP or prior prompts are excluded. */
   takeUnusedSession(): NewSessionResponse | undefined {
     const session = this.connected ? this.unusedSession : undefined;
     this.unusedSession = undefined;
@@ -198,104 +213,47 @@ export class AcpClient {
     signal?: AbortSignal,
   ): Promise<void> {
     const option = modelOption(session);
-    const wanted =
-      model === 'server-default' ? this.config.defaultModel : model || this.config.defaultModel;
-    if (!wanted) return;
-    if (!option || !selectValues(option).some((c) => c.value === wanted))
-      throw new LlmError(
-        'Selected model is not announced in the official ACP model selector. Run doctor and use an exact server model ID.',
-        'ACP_INVALID_MODEL',
-      );
-    if (option.currentValue === wanted) return;
+    if (!option) return;
     await this.bounded(
-      this.connection!.agent.request(methods.agent.session.setConfigOption, {
+      this.connection!.agent.request(methods.agent.session.setOption, {
         sessionId: session.sessionId,
-        configId: option.id,
-        value: wanted,
+        optionId: option.id,
+        value: model,
       }),
       this.config.requestTimeoutMs,
       signal,
     );
-  }
-
-  prompt(
-    sessionId: string,
-    text: string,
-    signal?: AbortSignal,
-    timeoutMs = this.config.timeoutMs,
-  ): Promise<PromptResponse> {
-    if (this.unusedSession?.sessionId === sessionId) this.unusedSession = undefined;
-    return this.bounded(
-      this.connection!.agent.request(methods.agent.session.prompt, {
-        sessionId,
-        prompt: [{ type: 'text', text }],
-      }),
-      timeoutMs,
-      signal,
-    );
-  }
-
-  async logout(signal?: AbortSignal): Promise<void> {
-    await this.start(signal);
-    if (!this.initializeResult?.agentCapabilities?.auth?.logout)
-      throw new LlmError(
-        'The official server does not advertise logout.',
-        'ACP_METHOD_UNSUPPORTED',
-      );
-    await this.bounded(
-      this.connection!.agent.request('logout', {}),
-      this.config.requestTimeoutMs,
-      signal,
-    );
-    await this.reset();
-  }
-
-  async cancelAndReset(sessionId?: string): Promise<void> {
-    if (this.stopping) return this.stopping;
-    if (sessionId && this.connected) {
-      // ACP cancel is a notification, not a JSON-RPC request.
-      try {
-        await this.bounded(
-          this.connection!.agent.notify(methods.agent.session.cancel, { sessionId }),
-          this.config.cancelGraceMs,
-        );
-      } catch {
-        /* reset owns cleanup */
-      }
-    }
-    await this.reset();
   }
 
   async reset(): Promise<void> {
-    if (this.stopping) return this.stopping;
-    const child = this.child,
-      connection = this.connection;
+    const child = this.child;
+    const connection = this.connection;
+    const cwd = this.cwd;
     this.child = undefined;
     this.connection = undefined;
     this.initializeResult = undefined;
     this.unusedSession = undefined;
     this.sessionCount = 0;
+    this.cwd = undefined;
+    if (this.stopping) await this.stopping;
+    if (!child && !connection && !cwd) return;
     this.stopping = (async () => {
-      connection?.close();
-      if (child) await disposeProcess(child, this.config.disposeGraceMs);
+      try {
+        if (connection) await connection.close();
+        if (child) await disposeProcess(child, this.config.disposeGraceMs);
+      } finally {
+        if (cwd) await rm(cwd, { recursive: true, force: true }).catch(() => {});
+      }
     })();
     try {
       await this.stopping;
-    } catch {
-      throw new LlmError(
-        'Official ACP subprocess cleanup failed. Restart this DSH profile before retrying.',
-        'ACP_TEARDOWN_FAILED',
-      );
     } finally {
       this.stopping = undefined;
     }
   }
+
   async dispose(): Promise<void> {
     this.disposed = true;
     await this.reset();
-    if (this.cwd) {
-      await rm(this.cwd, { recursive: true, force: true });
-      this.cwd = undefined;
-    }
   }
 }

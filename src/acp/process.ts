@@ -4,6 +4,8 @@ import { LlmError } from '@deepseek-ai/dsh-llm';
 import type { SubprocessHandle, SubprocessRuntime } from '@deepseek-ai/dsh-subprocess';
 import type { Config } from '../config.js';
 import { ensureOfficialServer } from './installer.js';
+import { validateAndFormatServerArgs } from '../acp-runner.js';
+
 export async function resolveCommand(
   config: Config,
   runtime: SubprocessRuntime,
@@ -19,6 +21,7 @@ export async function resolveCommand(
     ? [explicit]
     : [
         ...names,
+        ...names.map((n) => join(homedir(), '.local', 'opt', 'agy-acp', 'current', n)),
         ...names.map((n) => join(homedir(), '.local', 'bin', n)),
         ...names.map((n) => join(homedir(), '.local', 'share', 'antigravity-acp', n)),
       ];
@@ -44,15 +47,11 @@ export async function resolveCommand(
     'ACP_BINARY_MISSING',
   );
 }
+
 export function serverArgs(config: Config, command: string): string[] {
-  // Both Linux architectures in the official Registry require this flag.
-  const name = basename(command);
-  return process.platform === 'linux' &&
-    ['agy_acp_server.par', 'agy_acp_server'].includes(name) &&
-    !config.args.some((a) => a.startsWith('--uid='))
-    ? ['--uid=', ...config.args]
-    : [...config.args];
+  return validateAndFormatServerArgs(config, command);
 }
+
 export async function disposeProcess(child: SubprocessHandle, graceMs: number): Promise<void> {
   child.stdin?.end();
   let exited = false;

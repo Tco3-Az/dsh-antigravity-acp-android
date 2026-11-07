@@ -1,84 +1,68 @@
 {
   "name": "dsh-antigravity-acp",
-  "version": "0.3.5",
-  "description": "Official Google Antigravity ACP provider with DSH-owned tools over MCP",
+  "version": "0.4.0",
+  "description": "Google Antigravity ACP Android native plugin with PRoot ARM64 patch, native OAuth loopback and DSH Go UI",
   "type": "module",
   "license": "MIT",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "main": "lib/index.js",
+  "types": "src/index.ts",
   "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "default": "./dist/index.js"
-    }
+    ".": "./lib/index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
   },
   "bin": {
-    "dsh-antigravity-acp": "dist/cli.js"
+    "dsh-antigravity-acp": "lib/cli.js"
   },
   "files": [
-    "dist",
+    "lib",
+    "bin",
     "cordis.patch.yml",
     "README.md",
-    "LICENSE",
-    "THIRD_PARTY_NOTICES.md",
-    "docs"
+    "LICENSE"
   ],
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/dannndouglas/dsh-antigravity-acp.git"
-  },
-  "keywords": [
-    "dsh-plugin",
-    "deepseek-harness",
-    "antigravity",
-    "acp"
-  ],
-  "engines": {
-    "node": ">=22.19"
-  },
-  "scripts": {
-    "build": "tsc",
-    "typecheck": "tsc -p tsconfig.test.json",
-    "format:check": "prettier --check src tests scripts",
-    "test": "vitest run",
-    "check": "npm run typecheck && npm test && npm run build && node scripts/check-package.mjs",
-    "auth": "npm run build && node dist/cli.js login",
-    "probe": "npm run build && node dist/cli.js probe",
-    "prepack": "npm run build"
-  },
-  "dependencies": {
-    "@agentclientprotocol/sdk": "1.4.0",
-    "@deepseek-ai/schemastery": "3.18.4",
-    "@modelcontextprotocol/sdk": "1.32.2",
-    "ajv": "8.20.0",
-    "yauzl": "3.4.0"
-  },
-  "peerDependencies": {
-    "@deepseek-ai/cordis": "~4.0.4 || 4.0.5-alpha.1 || ~4.1.0",
-    "@deepseek-ai/dsh-llm": "0.2.0-rc.2 || 0.2.1-alpha.1 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.5 || 0.2.2-rc.1",
-    "@deepseek-ai/dsh-subprocess": "0.2.0-rc.2 || 0.2.1-alpha.1 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.5 || 0.2.2-rc.1",
-    "@deepseek-ai/dsh-subprocess-local": "0.2.0-rc.2 || 0.2.1-alpha.1 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.5 || 0.2.2-rc.1"
-  },
-  "peerDependenciesMeta": {
-    "@deepseek-ai/dsh-subprocess-local": {
-      "optional": true
+  "dshGo": {
+    "v": 1,
+    "title": {
+      "zh": "Antigravity",
+      "en": "Antigravity"
+    },
+    "icon": "model",
+    "contributes": {
+      "composer.strip": [
+        {
+          "id": "acp-strip",
+          "icon": "model",
+          "panel": "acp-panel"
+        }
+      ],
+      "panels": [
+        {
+          "id": "acp-panel",
+          "title": {
+            "zh": "Antigravity",
+            "en": "Antigravity"
+          },
+          "icon": "model",
+          "placement": [
+            "session.tab",
+            "features"
+          ]
+        }
+      ]
     }
   },
-  "devDependencies": {
-    "@deepseek-ai/cordis": "4.1.0",
-    "@deepseek-ai/dsh-app-boot": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-llm": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-subprocess": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-subprocess-local": "0.2.2-rc.1",
-    "@types/node": "^22.15.0",
-    "@types/yauzl": "3.4.0",
-    "prettier": "3.6.2",
-    "typescript": "^5.9.3",
-    "vitest": "^4.1.11"
+  "engines": {
+    "node": ">=22.19",
+    "dsh": ">=0.2.1-rc.2 <0.3.0-0"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "check": "node ../dsh-go-repo/sdk/plugin-kit/bin/check.mjs . --load"
   }
 }

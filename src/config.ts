@@ -1,4 +1,5 @@
 import z from '@deepseek-ai/schemastery';
+
 export interface Config {
   provider: string;
   command: string;
@@ -18,7 +19,9 @@ export interface Config {
   cancelGraceMs: number;
   disposeGraceMs: number;
   maxSessionsPerProcess: number;
+  handshakeTimeoutMs: number;
 }
+
 export const Config: z<Config> = z.object({
   provider: z.string().default('antigravity-acp'),
   command: z.string().default(''),
@@ -38,7 +41,9 @@ export const Config: z<Config> = z.object({
   cancelGraceMs: z.natural().default(1500),
   disposeGraceMs: z.natural().default(3000),
   maxSessionsPerProcess: z.natural().default(100),
+  handshakeTimeoutMs: z.natural().default(120000),
 });
+
 export function resolveConfig(input: Partial<Config> = {}): Config {
   const config = Config(input as Config);
   if (!config.provider.trim()) throw new Error('provider must not be empty');
@@ -53,6 +58,7 @@ export function resolveConfig(input: Partial<Config> = {}): Config {
     'toolTimeoutMs',
     'maxActiveToolSessions',
     'idleProcessTimeoutMs',
+    'handshakeTimeoutMs',
   ] as const) {
     if (!Number.isSafeInteger(config[key]) || config[key] <= 0 || config[key] > 2147483647)
       throw new Error(`${key} must be a positive integer <= 2147483647`);
