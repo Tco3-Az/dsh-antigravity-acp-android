@@ -15,6 +15,8 @@ import type { Config } from '../config.js';
 import { DshMcpBridge } from './bridge.js';
 import type { AcpGenerateOptions as GenerateOptions } from '../request.js';
 import type { AndroidOAuthManager } from '../android-oauth.js';
+import type { NewSessionResponse } from '@agentclientprotocol/sdk';
+import { acpReasoningEffort } from '../models.js';
 
 interface Pending {
   call: ToolCallBlock;
@@ -61,6 +63,7 @@ function signature(o: GenerateOptions): string {
     model: o.model,
     system: o.system ?? null,
     tools: o.tools ?? [],
+    reasoningEffort: acpReasoningEffort(o.reasoningEffort) ?? null,
   });
 }
 const unavailable = (): CallToolResult => ({
@@ -88,6 +91,7 @@ export class ToolSessions {
     private runtime: SubprocessRuntime,
     private notify: (message: string) => void,
     private oauthManager?: AndroidOAuthManager,
+    private onSessionState?: (session: NewSessionResponse) => void,
   ) {}
   get active(): number {
     return this.bindings.size;
@@ -132,6 +136,7 @@ export class ToolSessions {
     const client =
       this.borrowReadyClient() ??
       new AcpClient(this.config, this.runtime, this.notify, this.oauthManager);
+    client.onSessionState = this.onSessionState;
     this.borrowedClients.delete(client); // An active Binding takes ownership synchronously.
     return client;
   }
@@ -267,6 +272,7 @@ export class ToolSessions {
       const session = await client.newSession(b.controller.signal, true, [descriptor]);
       b.sessionId = session.sessionId;
       await client.selectModel(session, o.model, b.controller.signal);
+      await client.selectReasoning(session, o.reasoningEffort, b.controller.signal);
       client.onUpdate = (event) => {
         if (event.sessionId !== b.sessionId || b.done) return;
         const u = event.update;

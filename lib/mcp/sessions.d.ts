@@ -4,6 +4,7 @@ import { AcpClient } from '../acp/client.js';
 import type { Config } from '../config.js';
 import type { AcpGenerateOptions as GenerateOptions } from '../request.js';
 import type { AndroidOAuthManager } from '../android-oauth.js';
+import type { NewSessionResponse } from '@agentclientprotocol/sdk';
 /** Active turns own separate ACP processes, avoiding subagent deadlocks.
  * Completed processes can stay ready; every independent turn gets a fresh ACP session.
  */
@@ -12,6 +13,7 @@ export declare class ToolSessions {
     private runtime;
     private notify;
     private oauthManager?;
+    private onSessionState?;
     private bindings;
     private closing;
     private idleClients;
@@ -21,7 +23,7 @@ export declare class ToolSessions {
     processStarts: number;
     authentications: number;
     generations: number;
-    constructor(config: Config, runtime: SubprocessRuntime, notify: (message: string) => void, oauthManager?: AndroidOAuthManager | undefined);
+    constructor(config: Config, runtime: SubprocessRuntime, notify: (message: string) => void, oauthManager?: AndroidOAuthManager | undefined, onSessionState?: ((session: NewSessionResponse) => void) | undefined);
     get active(): number;
     get idle(): number;
     get connected(): boolean;

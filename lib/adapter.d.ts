@@ -17,6 +17,26 @@ export declare class AntigravityAcpAdapter extends LlmAdapter {
     private generations;
     private warnedTools;
     private catalog;
+    private selected?;
+    private discoveryError?;
+    private listeners;
+    onStateChange(listener: () => void): () => void;
+    private emitState;
+    private observeSession;
+    private createClient;
+    modelState(): {
+        models: {
+            id: string;
+            name: string;
+        }[];
+        currentModel: {
+            id: string;
+            name: string;
+        } | undefined;
+        discoveryError: string | undefined;
+        connected: boolean;
+    };
+    refreshModels(signal?: AbortSignal): Promise<readonly LlmModelInfo[]>;
     constructor(config: Config, runtime: SubprocessRuntime, warn?: (message: string) => void, oauth?: AndroidOAuthManager);
     get client(): AcpClient;
     providerInfo(provider: string): {
@@ -24,7 +44,7 @@ export declare class AntigravityAcpAdapter extends LlmAdapter {
         name: string;
     };
     private acquire;
-    listModels(provider: string): Promise<readonly LlmModelInfo[]>;
+    listModels(provider: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]>;
     resolveModel(provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo>;
     diagnostics(): {
         connected: boolean;

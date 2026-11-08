@@ -18,7 +18,7 @@ import type { Config } from '../config.js';
 import { connectTransport } from './transport.js';
 import { disposeProcess, resolveCommand, serverArgs } from './process.js';
 import { aborted, classify } from './errors.js';
-import { modelOption, selectValues } from '../models.js';
+import { acpReasoningEffort, currentModel, modelCatalog, modelOption, selectValues, type ModelSession } from '../models.js';
 import { prepareRunnerEnv } from '../acp-runner.js';
 import { oauthManager, type AndroidOAuthManager } from '../android-oauth.js';
 
@@ -35,6 +35,8 @@ export class AcpClient {
   processStarts = 0;
   authentications = 0;
   onUpdate?: (event: SessionNotification) => void;
+  onSessionState?: (session: NewSessionResponse) => void;
+  private sessions = new Map<string, NewSessionResponse>();
   onPermission?: (request: RequestPermissionRequest) => void | RequestPermissionResponse;
 
   constructor(
@@ -126,7 +128,14 @@ export class AcpClient {
       const connection = connectTransport(
         child.stdout,
         child.stdin,
-        (event) => this.onUpdate?.(event),
+        (event) => {
+          const session = this.sessions.get(event.sessionId);
+          if (session && event.update.sessionUpdate === 'config_option_update') {
+            session.configOptions = event.update.configOptions;
+            this.onSessionState?.(session);
+          }
+          this.onUpdate?.(event);
+        },
         (request) => this.onPermission?.(request),
       );
       this.connection = connection;
@@ -205,6 +214,8 @@ export class AcpClient {
       session = await create();
     }
     this.sessionCount++;
+    this.sessions.set(session.sessionId, session);
+    this.onSessionState?.(session);
     this.oauth.markAuthenticated();
     if (!mcpServers.length) this.unusedSession = session;
     return session;
@@ -226,21 +237,67 @@ export class AcpClient {
     const wanted =
       model === 'server-default' ? this.config.defaultModel : model || this.config.defaultModel;
     if (!wanted) return;
-    if (!option || !selectValues(option).some((c) => c.value === wanted))
+    if (!modelCatalog(session).some((c) => c.id === wanted))
       throw new LlmError(
-        'Selected model is not announced in the official ACP model selector. Run doctor and use an exact server model ID.',
+        'Selected model is not announced by the official ACP server. Refresh models and use an exact server model ID.',
         'ACP_INVALID_MODEL',
       );
-    if (option.currentValue === wanted) return;
-    await this.bounded(
-      this.connection!.agent.request(methods.agent.session.setConfigOption, {
-        sessionId: session.sessionId,
-        configId: option.id,
-        value: wanted,
-      }),
-      this.config.requestTimeoutMs,
-      signal,
+    if (currentModel(session)?.id === wanted) return;
+    if (option && selectValues(option).some((c) => c.value === wanted)) {
+      const result = await this.bounded(
+        this.connection!.agent.request(methods.agent.session.setConfigOption, {
+          sessionId: session.sessionId,
+          configId: option.id,
+          value: wanted,
+        }),
+        this.config.requestTimeoutMs,
+        signal,
+      );
+      session.configOptions = result.configOptions;
+    } else {
+      // Use the legacy method ONLY when this session announces legacy models.
+      const legacy = (session as ModelSession).models;
+      if (!legacy?.availableModels.some((m) => m.modelId === wanted))
+        throw new LlmError('Official ACP model selector is unavailable.', 'ACP_INVALID_MODEL');
+      await this.bounded(
+        this.connection!.agent.request('session/set_model', {
+          sessionId: session.sessionId, modelId: wanted,
+        }),
+        this.config.requestTimeoutMs,
+        signal,
+      );
+      legacy.currentModelId = wanted;
+    }
+    this.onSessionState?.(session);
+  }
+
+  async selectReasoning(
+    session: NewSessionResponse,
+    effort?: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const normalized = acpReasoningEffort(effort);
+    if (!normalized) return;
+    const option = session.configOptions?.find((c) => c.type === 'select' &&
+      (c.category === 'thought_level' || c.id === 'thought_level' || c.id === 'reasoning_effort'));
+    // Model-ID-based thinking remains authoritative on older servers.
+    if (!option || option.type !== 'select') return;
+    const values = selectValues(option);
+    const aliases = normalized === 'off' ? ['off', 'none']
+      : normalized === 'none' ? ['none', 'off'] : [normalized];
+    const wanted = aliases.find((id) => values.some((value) => value.value === id));
+    if (!wanted) throw new LlmError(
+      'Selected thinking level is not announced by the official ACP server. Choose an advertised level.',
+      'ACP_INVALID_REASONING',
     );
+    if (option.currentValue === wanted) return;
+    const result = await this.bounded(
+      this.connection!.agent.request(methods.agent.session.setConfigOption, {
+        sessionId: session.sessionId, configId: option.id, value: wanted,
+      }), this.config.requestTimeoutMs, signal,
+    );
+    session.configOptions = result.configOptions;
+    this.onSessionState?.(session);
   }
 
   prompt(
@@ -300,6 +357,7 @@ export class AcpClient {
     this.initializeResult = undefined;
     this.unusedSession = undefined;
     this.sessionCount = 0;
+    this.sessions.clear();
     this.stopping = (async () => {
       connection?.close();
       if (child) await disposeProcess(child, this.config.disposeGraceMs);

@@ -19,6 +19,8 @@ export declare class AcpClient {
     processStarts: number;
     authentications: number;
     onUpdate?: (event: SessionNotification) => void;
+    onSessionState?: (session: NewSessionResponse) => void;
+    private sessions;
     onPermission?: (request: RequestPermissionRequest) => void | RequestPermissionResponse;
     constructor(config: Config, runtime: SubprocessRuntime, notify?: (message: string) => void, oauth?: AndroidOAuthManager);
     get connected(): boolean;
@@ -29,6 +31,7 @@ export declare class AcpClient {
     /** Claim a still-empty discovery session once. Sessions with MCP or prior prompts are excluded. */
     takeUnusedSession(): NewSessionResponse | undefined;
     selectModel(session: NewSessionResponse, model: string, signal?: AbortSignal): Promise<void>;
+    selectReasoning(session: NewSessionResponse, effort?: string, signal?: AbortSignal): Promise<void>;
     prompt(sessionId: string, text: string, signal?: AbortSignal, timeoutMs?: number): Promise<PromptResponse>;
     logout(signal?: AbortSignal): Promise<void>;
     cancelAndReset(sessionId?: string): Promise<void>;

@@ -90,9 +90,12 @@ export function unauthCardView(options: UiAuthOptions = {}) {
 
 export function connectedCardView(options: UiQuotaOptions = {}) {
   const isZh = (options.lang ?? 'zh').startsWith('zh');
-  const model = options.model ?? 'server-default';
-  const percent = options.quotaPercent ?? 100;
-  const reset = options.resetTime ?? (isZh ? '每日重置' : 'Daily');
+  const model = options.model && options.model !== 'server-default'
+    ? options.model : (isZh ? '服务端默认' : 'Server default');
+  const percent = options.quotaPercent;
+  const quota = typeof percent === 'number' && Number.isFinite(percent) && percent >= 0 && percent <= 100
+    ? `${percent}%` : (isZh ? '服务端未提供' : 'Not reported');
+  const reset = options.resetTime ?? (isZh ? '服务端未提供' : 'Not reported');
 
   return {
     v: 1 as const,
@@ -103,19 +106,24 @@ export function connectedCardView(options: UiQuotaOptions = {}) {
         type: 'keyValue' as const,
         items: [
           [isZh ? '当前模型' : 'Model', model],
-          [isZh ? '额度剩余' : 'Quota', `${percent}%`],
+          [isZh ? '额度剩余' : 'Quota', quota],
           [isZh ? '重置周期' : 'Reset', reset],
         ],
       },
+      { type: 'actions' as const, items: [
+        { label: isZh ? '刷新模型' : 'Refresh', action: { id: 'refresh-models' } },
+      ] },
     ],
   };
 }
 
-export function stripView(state: { authorized?: boolean } = {}, lang = 'zh') {
+export function stripView(state: { authorized?: boolean; connected?: boolean } = {}, lang = 'zh') {
   const isZh = lang.startsWith('zh');
   if (state.authorized) {
     return {
-      text: isZh ? 'Antigravity 运行中' : 'Antigravity active',
+      text: state.connected
+        ? (isZh ? 'Antigravity 已连接' : 'Antigravity connected')
+        : (isZh ? 'Antigravity 已登录' : 'Antigravity signed in'),
       icon: 'model',
       tone: 'good',
     };

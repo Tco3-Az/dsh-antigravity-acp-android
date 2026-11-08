@@ -76,13 +76,22 @@ export declare function connectedCardView(options?: UiQuotaOptions): {
     v: 1;
     type: "stack";
     title: string;
-    children: {
+    children: ({
         type: "keyValue";
         items: string[][];
-    }[];
+    } | {
+        type: "actions";
+        items: {
+            label: string;
+            action: {
+                id: string;
+            };
+        }[];
+    })[];
 };
 export declare function stripView(state?: {
     authorized?: boolean;
+    connected?: boolean;
 }, lang?: string): {
     text: string;
     icon: string;

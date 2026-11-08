@@ -10,7 +10,8 @@ import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess';
 import { AcpClient } from './acp/client.js';
 import { EventMapper, finishReason } from './acp/events.js';
 import { aborted, classify } from './acp/errors.js';
-import { modelCatalog } from './models.js';
+import { currentModel, modelCatalog, type DiscoveredModel } from './models.js';
+import type { NewSessionResponse } from '@agentclientprotocol/sdk';
 import { buildPrompt } from './prompt.js';
 import type { Config } from './config.js';
 import { ToolSessions } from './mcp/sessions.js';
@@ -18,15 +19,10 @@ import type { AcpGenerateOptions as GenerateOptions } from './request.js';
 import { oauthManager, type AndroidOAuthManager } from './android-oauth.js';
 
 /**
- * DSH 0.2.1-rc.3 requires every model entry to declare reasoning metadata
- * before a request carrying a `reasoningEffort` is accepted; without it the
- * host throws UNSUPPORTED_REASONING_EFFORT for any effort, including `off`.
- *
- * Antigravity encodes the thinking level into the model ID suffix
- * (`-low` / `-medium` / `-high`) and this adapter never consumes
- * `options.reasoningEffort`, so a full host-neutral effort list is declared
- * purely to satisfy the host contract. See
- * https://github.com/dannndouglas/dsh-antigravity-acp/issues/1
+ * DSH validates effort before dispatch (including xhigh from its native UI).
+ * Older ACP sessions encode thinking in the exact model ID and expose no
+ * independent selector; newer sessions can announce a thought_level option.
+ * selectReasoning forwards only an advertised selector, never a prompt hack.
  */
 const REASONING_META = {
   efforts: [
@@ -34,6 +30,7 @@ const REASONING_META = {
     { id: ReasoningEffortId('low'), name: 'Low' },
     { id: ReasoningEffortId('medium'), name: 'Medium' },
     { id: ReasoningEffortId('high'), name: 'High' },
+    { id: ReasoningEffortId('xhigh'), name: 'Extra high' },
     { id: ReasoningEffortId('max'), name: 'Max' },
   ],
 };
@@ -46,7 +43,43 @@ export class AntigravityAcpAdapter extends LlmAdapter {
   private lifetime = new AbortController();
   private generations = 0;
   private warnedTools = false;
-  private catalog: { id: string; name: string }[] = [];
+  private catalog: DiscoveredModel[] = [];
+  private selected?: DiscoveredModel;
+  private discoveryError?: string;
+  private listeners = new Set<() => void>();
+
+  onStateChange(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  }
+  private emitState(): void {
+    for (const listener of this.listeners) { try { listener(); } catch { /* observers cannot veto state */ } }
+  }
+  private observeSession(session: NewSessionResponse): void {
+    const catalog = modelCatalog(session);
+    const selected = currentModel(session);
+    const changed = JSON.stringify([catalog, selected]) !== JSON.stringify([this.catalog, this.selected]);
+    this.catalog = catalog;
+    this.selected = selected;
+    this.discoveryError = catalog.length ? undefined : 'ACP_MODEL_DISCOVERY_EMPTY';
+    if (changed) this.emitState();
+  }
+  private createClient(): AcpClient {
+    const client = new AcpClient(this.config, this.runtime, this.warn, this.oauth);
+    client.onSessionState = (session) => this.observeSession(session);
+    return client;
+  }
+  modelState() {
+    return { models: this.catalog.map((m) => ({ ...m })), currentModel: this.selected ? { ...this.selected } : undefined,
+      discoveryError: this.discoveryError, connected: this.client.connected || this.tools.connected };
+  }
+  async refreshModels(signal?: AbortSignal): Promise<readonly LlmModelInfo[]> {
+    const activeSignal = signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal;
+    const release = await this.acquire(activeSignal);
+    try { this.catalog = []; this.discoveryError = undefined; }
+    finally { release(); }
+    return this.listModels(this.config.provider, activeSignal);
+  }
 
   constructor(
     readonly config: Config,
@@ -55,8 +88,8 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     private oauth: AndroidOAuthManager = oauthManager,
   ) {
     super();
-    this.controlClient = new AcpClient(config, runtime, warn, oauth);
-    this.tools = new ToolSessions(config, runtime, warn, oauth);
+    this.controlClient = this.createClient();
+    this.tools = new ToolSessions(config, runtime, warn, oauth, (session) => this.observeSession(session));
   }
 
   get client(): AcpClient {
@@ -94,23 +127,27 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     }
   }
 
-  async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    const release = await this.acquire(this.lifetime.signal);
+  async listModels(provider: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]> {
+    const activeSignal = signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal;
+    const release = await this.acquire(activeSignal);
     try {
       if (!this.catalog.length) {
         try {
-          this.catalog = modelCatalog(await this.client.newSession(this.lifetime.signal, false));
+          this.observeSession(await this.client.newSession(activeSignal, false));
           if (
             this.config.toolPolicy === 'bridge' &&
             this.catalog.length &&
             this.client.initializeResult?.agentCapabilities?.mcpCapabilities?.http
           ) {
             const ready = this.controlClient;
-            this.controlClient = new AcpClient(this.config, this.runtime, this.warn, this.oauth);
+            this.controlClient = this.createClient();
             await this.tools.acceptReadyClient(ready);
           }
         } catch (error) {
           await this.client.reset();
+          if (activeSignal.aborted) throw aborted();
+          this.discoveryError = classify(error).code;
+          this.emitState();
           this.warn(classify(error).message);
         }
       }
@@ -120,11 +157,9 @@ export class AntigravityAcpAdapter extends LlmAdapter {
           m,
         ]),
       );
-      if (!entries.size)
-        entries.set('server-default', {
-          id: 'server-default',
-          name: 'Server default (login / discovery pending)',
-        });
+      // Keep the alias stable across login/discovery. DSH may still have it
+      // selected while a refreshed catalog replaces the previous placeholder.
+      entries.set('server-default', { id: 'server-default', name: 'Server default' });
       return [...entries.values()].map((m) => ({
         ...m,
         provider,
@@ -146,7 +181,7 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     return {
       provider,
       id: model,
-      name: this.catalog.find((m) => m.id === model)?.name ?? model,
+      name: model === 'server-default' ? 'Server default' : this.catalog.find((m) => m.id === model)?.name ?? model,
       inputModalities: ['text'],
       reasoning: REASONING_META,
     };
@@ -195,8 +230,9 @@ export class AntigravityAcpAdapter extends LlmAdapter {
       }
       const session = client.takeUnusedSession() ?? (await client.newSession(options.signal));
       sessionId = session.sessionId;
-      this.catalog = modelCatalog(session);
+      this.observeSession(session);
       await client.selectModel(session, options.model, options.signal);
+      await client.selectReasoning(session, options.reasoningEffort, options.signal);
       this.generations++;
       const nativeTools = () => {
         error = new LlmError(
@@ -279,6 +315,7 @@ export class AntigravityAcpAdapter extends LlmAdapter {
   async dispose(): Promise<void> {
     this.disposed = true;
     this.lifetime.abort();
+    this.listeners.clear();
     await Promise.all([this.client.dispose(), this.tools.dispose()]);
   }
 }
