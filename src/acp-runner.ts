@@ -108,7 +108,7 @@ export function prepareRunnerEnv(
   env.NO_PROXY = '127.0.0.1,localhost,::1';
   env.no_proxy = '127.0.0.1,localhost,::1';
 
-  // 5. Ensure unbuffered Python output and disable background auto-updater overwriting VA39 patch
+  // 5. Ensure unbuffered Python output and disable background auto-updater overwriting the Android allocator patch
   env.PYTHONUNBUFFERED = '1';
   env.AGY_CLI_DISABLE_AUTO_UPDATE = 'true';
 

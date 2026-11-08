@@ -1,4 +1,5 @@
 export declare const SERVER_VERSION = "1.3.0";
+export declare const ANDROID_PATCH_REVISION = 2;
 export declare function distribution(platform?: string, arch?: string): {
     key: string;
     command: string;

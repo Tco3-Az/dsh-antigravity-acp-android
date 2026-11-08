@@ -21,6 +21,7 @@ import { aborted } from './errors.js';
 import { patchExecutableFile } from '../binary-patcher.js';
 
 export const SERVER_VERSION = '1.3.0';
+export const ANDROID_PATCH_REVISION = 2;
 
 export function distribution(platform = process.platform as string, arch = process.arch as string) {
   const os = { win32: 'windows', darwin: 'macos', linux: 'linux' }[platform];
@@ -100,7 +101,7 @@ async function publicationLock(path: string, signal: AbortSignal): Promise<() =>
   }
 }
 
-async function ready(directory: string, command: string): Promise<boolean> {
+async function ready(directory: string, command: string, androidPatchRequired = false): Promise<boolean> {
   try {
     if (!(await lstat(directory)).isDirectory() || (await lstat(directory)).isSymbolicLink())
       return false;
@@ -110,6 +111,7 @@ async function ready(directory: string, command: string): Promise<boolean> {
     const receipt = JSON.parse(await readFile(receiptPath, 'utf8'));
     if (
       receipt.version !== SERVER_VERSION ||
+      (androidPatchRequired && receipt.androidPatchRevision !== ANDROID_PATCH_REVISION) ||
       !Array.isArray(receipt.files) ||
       !receipt.files.some((file: FileRecord) => file.name === command && file.size > 0)
     )
@@ -204,6 +206,7 @@ async function unpack(
 export async function ensureOfficialServer(options: InstallOptions = {}): Promise<string> {
   options.signal?.throwIfAborted();
   const artifact = distribution(options.platform, options.arch);
+  const androidPatchRequired = artifact.key === 'linux-arm64';
   const root = resolve(
     options.cacheRoot ??
       (process.env.DSH_HOME
@@ -211,7 +214,7 @@ export async function ensureOfficialServer(options: InstallOptions = {}): Promis
         : join(homedir(), '.local', 'opt', 'agy-acp', 'current')),
   );
   const directory = join(root, `${SERVER_VERSION}-${artifact.key}`);
-  if (await ready(directory, artifact.command)) return join(directory, artifact.command);
+  if (await ready(directory, artifact.command, androidPatchRequired)) return join(directory, artifact.command);
   const signal = AbortSignal.any([
     AbortSignal.timeout(options.timeoutMs ?? 180000),
     ...(options.signal ? [options.signal] : []),
@@ -254,23 +257,20 @@ export async function ensureOfficialServer(options: InstallOptions = {}): Promis
     if (!files.some((file) => file.name === artifact.command && file.size > 0))
       throw Error('missing server');
 
-    // ARM64 Linux / PRoot Android Binary Patching (TCMalloc VA39 + Syscall 439 faccessat2)
+    // Do not silently publish an unpatched ARM64 server when patching fails.
+    // Windows/macOS/x86 binaries are not Android patch targets.
     const serverPath = join(payload, artifact.command);
-    const helperPath = join(payload, 'localharness_external');
-
-    try {
+    if (androidPatchRequired) {
       await patchExecutableFile(serverPath);
-      await chmod(serverPath, 0o755);
-    } catch {
-      // Continue if non-ELF
+      const helperPath = join(payload, 'localharness_external');
+      try {
+        await lstat(helperPath);
+        await patchExecutableFile(helperPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
     }
-
-    try {
-      await patchExecutableFile(helperPath);
-      await chmod(helperPath, 0o755);
-    } catch {
-      // Helper might be optional on some platforms
-    }
+    await chmod(serverPath, 0o755);
 
     // Refresh file records with post-patch file sizes
     const updatedFiles: FileRecord[] = [];
@@ -281,14 +281,18 @@ export async function ensureOfficialServer(options: InstallOptions = {}): Promis
 
     await writeFile(
       join(payload, '.dsh-ready.json'),
-      JSON.stringify({ version: SERVER_VERSION, files: updatedFiles }),
+      JSON.stringify({
+        version: SERVER_VERSION,
+        androidPatchRevision: androidPatchRequired ? ANDROID_PATCH_REVISION : undefined,
+        files: updatedFiles,
+      }),
       { flag: 'wx', mode: 0o644 },
     );
     signal.throwIfAborted();
 
     const unlock = await publicationLock(`${directory}.lock`, signal);
     try {
-      if (!(await ready(directory, artifact.command))) {
+      if (!(await ready(directory, artifact.command, androidPatchRequired))) {
         try {
           await rename(directory, join(stage, 'obsolete'));
         } catch (error) {
@@ -299,7 +303,7 @@ export async function ensureOfficialServer(options: InstallOptions = {}): Promis
     } finally {
       await unlock();
     }
-    if (!(await ready(directory, artifact.command))) throw Error('invalid cache');
+    if (!(await ready(directory, artifact.command, androidPatchRequired))) throw Error('invalid cache');
     options.notify?.('Official Antigravity server is ready.');
     return join(directory, artifact.command);
   } catch {

@@ -20,17 +20,15 @@ export interface ByteRange {
  */
 export declare function findGoogleMallocSections(buffer: Buffer): ByteRange[];
 /**
- * Patch TCMalloc instructions inside a buffer slice (scoped to google_malloc).
- * Translates tag operations to bits 35..37 and bounds random base hints to 2^35 (32GB).
- * Supports both pristine 48-bit binaries and migration from 39-bit / 38-bit patched versions.
+ * Repair TCMalloc's complete VA39 layout inside google_malloc.
+ * Supports pristine Tag42, experimental Tag39, and incomplete legacy Tag35.
+ * Never move generic LSR #35 or MOV #2^35: these are Span/PageMap limits.
  */
 export declare function patchTcmallocSlice(slice: Buffer, allowRaw64BitLiterals: boolean): {
     maskHits: number;
     shiftHits: number;
 };
-/**
- * Patch Syscall 439 (faccessat2) -> Syscall 48 (faccessat).
- */
+/** Patch verified ARM64 faccessat2 call sites, never bare numeric constants. */
 export declare function patchSyscall439(buffer: Buffer): number;
 /**
  * Patch an ARM64 binary buffer in memory. Scopes TCMalloc patches to `google_malloc` sections.
