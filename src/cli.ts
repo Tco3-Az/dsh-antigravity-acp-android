@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
-import { createWriteStream } from 'node:fs';
+import { createWriteStream, readFileSync } from 'node:fs';
 import { mkdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -51,6 +51,39 @@ async function fallbackDownloadAndPatch(cacheRoot: string, platform: string, arc
   await rm(zipPath, { force: true });
   console.log('[installer] Applying ARM64 VA39 + faccessat2 binary patches...');
   return ensurePatchedServer({ cacheDir: cacheRoot });
+}
+
+function detectProot(): { isProot: boolean; reason: string } {
+  if (process.env.PROOT_TMP_DIR) return { isProot: true, reason: 'PROOT_TMP_DIR env' };
+  if (process.env.PROOT_LOADER) return { isProot: true, reason: 'PROOT_LOADER env' };
+  try {
+    if (process.platform === 'linux') {
+      const maps = readFileSync('/proc/self/maps', 'utf8');
+      if (maps.includes('libproot.so') || maps.includes('proot')) {
+        return { isProot: true, reason: 'libproot in /proc/self/maps' };
+      }
+    }
+  } catch {}
+  return { isProot: false, reason: 'No PRoot signatures found' };
+}
+
+function detectVaBits(): number {
+  if (process.platform !== 'linux') return 48;
+  try {
+    const maps = readFileSync('/proc/self/maps', 'utf8');
+    let maxAddr = 0n;
+    for (const line of maps.split('\n')) {
+      const match = line.match(/^[0-9a-f]+-([0-9a-f]+)\s/);
+      if (match) {
+        const end = BigInt('0x' + match[1]);
+        if (end > maxAddr) maxAddr = end;
+      }
+    }
+    if (maxAddr > 0n) {
+      return maxAddr.toString(2).length;
+    }
+  } catch {}
+  return 48;
 }
 
 async function run() {
@@ -113,12 +146,15 @@ Usage:
   }
 
   if (action === 'doctor') {
+    const prootInfo = detectProot();
+    const vaBits = detectVaBits();
     console.log('--- DSH Antigravity ACP Android Doctor ---');
     console.log(`Node.js version : ${process.version}`);
     console.log(`Architecture    : ${process.arch}`);
     console.log(`Platform        : ${process.platform}`);
     console.log(`UID             : ${process.getuid ? process.getuid() : 'N/A'}`);
-    console.log(`PROOT           : ${process.env.PROOT_TMP_DIR ? 'Yes (detected)' : 'No / Host'}`);
+    console.log(`PROOT           : ${prootInfo.isProot ? `Yes (${prootInfo.reason})` : 'No / Host'}`);
+    console.log(`Address Space   : ~${vaBits} bits (${vaBits <= 39 ? 'Android 39-bit VA space detected' : 'Standard 48-bit VA space'})`);
     console.log(`NO_PROXY env    : ${process.env.NO_PROXY || 'not set'}`);
     console.log('------------------------------------------');
     return;
