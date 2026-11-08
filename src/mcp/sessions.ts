@@ -17,6 +17,7 @@ import type { AcpGenerateOptions as GenerateOptions } from '../request.js';
 import type { AndroidOAuthManager } from '../android-oauth.js';
 import type { NewSessionResponse } from '@agentclientprotocol/sdk';
 import { acpReasoningEffort } from '../models.js';
+import { assertContextBudget } from '../context.js';
 
 interface Pending {
   call: ToolCallBlock;
@@ -276,6 +277,14 @@ export class ToolSessions {
       client.onUpdate = (event) => {
         if (event.sessionId !== b.sessionId || b.done) return;
         const u = event.update;
+        if (u.sessionUpdate === 'usage_update') {
+          try { assertContextBudget('', u); }
+          catch (error) {
+            this.fail(b, error);
+            void this.close(b).catch(() => {});
+          }
+          return;
+        }
         if (u.sessionUpdate === 'tool_call' || u.sessionUpdate === 'tool_call_update') {
           if (b.bridge.owns(u)) b.trustedAcpIds.add(u.toolCallId);
           else if (!b.trustedAcpIds.has(u.toolCallId))
@@ -359,6 +368,9 @@ export class ToolSessions {
     });
     if (!exposed.length)
       throw new LlmError('The ACP session has no exposed calls to resume.', 'ACP_SESSION_BUSY');
+    // Validate the WHOLE result batch before resolving any MCP promise.
+    // Otherwise a large tool return can overflow the parked ACP session.
+    b.client.checkContext(b.sessionId!, JSON.stringify(results.map(({ result }) => result)));
     b.history = history(o.messages);
     for (const { pending, result } of results) {
       b.pending.delete(pending.call.id);

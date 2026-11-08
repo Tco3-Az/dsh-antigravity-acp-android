@@ -2,6 +2,7 @@ import { LlmError } from '@deepseek-ai/dsh-llm';
 import type { AcpGenerateOptions as GenerateOptions } from './request.js';
 import type { Config } from './config.js';
 import { mcpToolName } from './mcp/bridge.js';
+import { assertContextBudget } from './context.js';
 export function buildPrompt(options: GenerateOptions, config: Config): string {
   // Thinking is selected through ACP configOptions when announced. Older
   // sessions keep their exact model ID tier; never inject reasoning into text.
@@ -34,7 +35,7 @@ export function buildPrompt(options: GenerateOptions, config: Config): string {
       return b; // Preserve historical text, reasoning, tool calls/results and developer updates.
     }),
   }));
-  return [
+  const prompt = [
     'DeepSeek Harness owns this conversation. Produce only the next assistant response using the supplied conversation.',
     ...(config.toolPolicy === 'bridge' && options.tools?.length
       ? [
@@ -63,4 +64,10 @@ export function buildPrompt(options: GenerateOptions, config: Config): string {
         : {}),
     }),
   ].join('\n\n');
+  // Include the complete projected history, system text and native MCP catalog.
+  // Tools appear in both the instructions and the separate MCP declaration.
+  const catalog = config.toolPolicy === 'bridge' && options.tools?.length
+    ? JSON.stringify(options.tools) : '';
+  assertContextBudget(prompt + catalog);
+  return prompt;
 }

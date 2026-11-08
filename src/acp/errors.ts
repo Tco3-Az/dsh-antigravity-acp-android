@@ -1,4 +1,5 @@
-import { LlmError } from '@deepseek-ai/dsh-llm';
+import { LlmError, isContextWindowExceededError } from '@deepseek-ai/dsh-llm';
+import { contextLimitError } from '../context.js';
 import { RequestError } from '@agentclientprotocol/sdk';
 export function aborted(): LlmError {
   return new LlmError('Antigravity generation was interrupted.', 'ABORTED');
@@ -6,6 +7,10 @@ export function aborted(): LlmError {
 export function classify(error: unknown): LlmError {
   if (error instanceof LlmError) return error;
   if (error instanceof RequestError) {
+    // Keep the host's context-compaction signal without retaining remote data,
+    // which may contain account details or request contents.
+    if (isContextWindowExceededError(error.message + ' ' + JSON.stringify(error.data ?? {})))
+      return contextLimitError();
     if (
       error.code === -32000 &&
       /auth|log.?in|sign.?in/i.test(error.message + JSON.stringify(error.data ?? {}))

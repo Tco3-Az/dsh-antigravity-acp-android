@@ -21,6 +21,7 @@ export declare class AcpClient {
     onUpdate?: (event: SessionNotification) => void;
     onSessionState?: (session: NewSessionResponse) => void;
     private sessions;
+    private contextUsage;
     onPermission?: (request: RequestPermissionRequest) => void | RequestPermissionResponse;
     constructor(config: Config, runtime: SubprocessRuntime, notify?: (message: string) => void, oauth?: AndroidOAuthManager);
     get connected(): boolean;
@@ -32,6 +33,8 @@ export declare class AcpClient {
     takeUnusedSession(): NewSessionResponse | undefined;
     selectModel(session: NewSessionResponse, model: string, signal?: AbortSignal): Promise<void>;
     selectReasoning(session: NewSessionResponse, effort?: string, signal?: AbortSignal): Promise<void>;
+    /** Validate additional prompt/tool-result bytes against the last reported occupancy. */
+    checkContext(sessionId: string, text: string): void;
     prompt(sessionId: string, text: string, signal?: AbortSignal, timeoutMs?: number): Promise<PromptResponse>;
     logout(signal?: AbortSignal): Promise<void>;
     cancelAndReset(sessionId?: string): Promise<void>;

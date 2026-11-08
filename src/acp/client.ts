@@ -21,6 +21,7 @@ import { aborted, classify } from './errors.js';
 import { acpReasoningEffort, currentModel, modelCatalog, modelOption, selectValues, type ModelSession } from '../models.js';
 import { prepareRunnerEnv } from '../acp-runner.js';
 import { oauthManager, type AndroidOAuthManager } from '../android-oauth.js';
+import { assertContextBudget, type AcpContextUsage } from '../context.js';
 
 /** One process per adapter, serialized by the adapter. No credentials or history are persisted here. */
 export class AcpClient {
@@ -37,6 +38,7 @@ export class AcpClient {
   onUpdate?: (event: SessionNotification) => void;
   onSessionState?: (session: NewSessionResponse) => void;
   private sessions = new Map<string, NewSessionResponse>();
+  private contextUsage = new Map<string, AcpContextUsage>();
   onPermission?: (request: RequestPermissionRequest) => void | RequestPermissionResponse;
 
   constructor(
@@ -130,6 +132,11 @@ export class AcpClient {
         child.stdin,
         (event) => {
           const session = this.sessions.get(event.sessionId);
+          if (event.update.sessionUpdate === 'usage_update') {
+            const { used, size } = event.update;
+            if (Number.isSafeInteger(used) && used >= 0 && Number.isSafeInteger(size) && size > 0)
+              this.contextUsage.set(event.sessionId, { used, size });
+          }
           if (session && event.update.sessionUpdate === 'config_option_update') {
             session.configOptions = event.update.configOptions;
             this.onSessionState?.(session);
@@ -300,12 +307,18 @@ export class AcpClient {
     this.onSessionState?.(session);
   }
 
+  /** Validate additional prompt/tool-result bytes against the last reported occupancy. */
+  checkContext(sessionId: string, text: string): void {
+    assertContextBudget(text, this.contextUsage.get(sessionId));
+  }
+
   prompt(
     sessionId: string,
     text: string,
     signal?: AbortSignal,
     timeoutMs = this.config.timeoutMs,
   ): Promise<PromptResponse> {
+    this.checkContext(sessionId, text);
     if (this.unusedSession?.sessionId === sessionId) this.unusedSession = undefined;
     return this.bounded(
       this.connection!.agent.request(methods.agent.session.prompt, {
@@ -358,6 +371,7 @@ export class AcpClient {
     this.unusedSession = undefined;
     this.sessionCount = 0;
     this.sessions.clear();
+    this.contextUsage.clear();
     this.stopping = (async () => {
       connection?.close();
       if (child) await disposeProcess(child, this.config.disposeGraceMs);

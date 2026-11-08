@@ -13,6 +13,7 @@ import { aborted, classify } from './acp/errors.js';
 import { currentModel, modelCatalog, type DiscoveredModel } from './models.js';
 import type { NewSessionResponse } from '@agentclientprotocol/sdk';
 import { buildPrompt } from './prompt.js';
+import { ACP_CONTEXT_WINDOW, assertContextBudget } from './context.js';
 import type { Config } from './config.js';
 import { ToolSessions } from './mcp/sessions.js';
 import type { AcpGenerateOptions as GenerateOptions } from './request.js';
@@ -184,6 +185,7 @@ export class AntigravityAcpAdapter extends LlmAdapter {
       name: model === 'server-default' ? 'Server default' : this.catalog.find((m) => m.id === model)?.name ?? model,
       inputModalities: ['text'],
       reasoning: REASONING_META,
+      context: { contextWindow: ACP_CONTEXT_WINDOW },
     };
   }
 
@@ -245,6 +247,14 @@ export class AntigravityAcpAdapter extends LlmAdapter {
       client.onPermission = nativeTools;
       client.onUpdate = (event) => {
         if (event.sessionId !== sessionId || done) return;
+        if (event.update.sessionUpdate === 'usage_update') {
+          try { assertContextBudget('', event.update); }
+          catch (failure) {
+            error = failure; done = true; wake?.();
+            void client.cancelAndReset(sessionId).catch(() => {});
+          }
+          return;
+        }
         if (
           event.update.sessionUpdate === 'tool_call' ||
           event.update.sessionUpdate === 'tool_call_update'

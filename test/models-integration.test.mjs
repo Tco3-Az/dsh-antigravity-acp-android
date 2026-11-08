@@ -25,7 +25,7 @@ const legacy = () => ({ sessionId: 'fixture-session', models: {
   currentModelId: models[0].id,
   availableModels: models.map((m) => ({ modelId: m.id, name: m.name })),
 } });
-function fixture(sessionFactory = modern) {
+function fixture(sessionFactory = modern, promptUsage) {
   const calls = [];
   const streams = new Set();
   let failDiscovery = false;
@@ -67,6 +67,12 @@ function fixture(sessionFactory = modern) {
           return send({ jsonrpc: '2.0', id: msg.id, result: { configOptions: result.configOptions } });
         }
         if (msg.method === 'session/set_model') return send({ jsonrpc: '2.0', id: msg.id, result: {} });
+        if (msg.method === 'session/prompt' && promptUsage) {
+          send({ jsonrpc: '2.0', method: 'session/update', params: {
+            sessionId: msg.params.sessionId, update: { sessionUpdate: 'usage_update', ...promptUsage },
+          } });
+          return;
+        }
         send({ jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: 'Unknown fixture method' } });
       });
       handle.send = send;
@@ -261,4 +267,48 @@ test('Native plugin host validates signed-in panel actions and deferred refresh'
   const settled = await refresh.settled;
   assert.equal(settled.t, 'done');
   assert.deepEqual(host.violations, []);
+});
+
+
+test('Live usage_update feeds the session budget; it is not emitted as billing usage', async (t) => {
+  const f = fixture(), client = new AcpClient(f.config, f.runtime);
+  t.after(() => client.dispose());
+  const session = await client.newSession(undefined, false);
+  const usage = new Promise((resolve) => { client.onUpdate = () => resolve(); });
+  [...f.streams][0].send({ jsonrpc: '2.0', method: 'session/update', params: {
+    sessionId: session.sessionId, update: { sessionUpdate: 'usage_update', used: 231999, size: 256000 },
+  } });
+  await usage;
+  assert.throws(() => client.checkContext(session.sessionId, 'four'), (e) => e.code === 'CONTEXT_LENGTH_EXCEEDED');
+  client.checkContext(session.sessionId, 'one');
+});
+
+test('Text and MCP streams cancel gracefully when official context occupancy crosses safe headroom', async (t) => {
+  for (const toolPolicy of ['text-only', 'bridge']) {
+    const f = fixture(modern, { used: 240000, size: 1000000 });
+    const spawn = f.runtime.spawn.bind(f.runtime);
+    f.runtime.spawn = (...args) => {
+      const handle = spawn(...args);
+      // Intercept only the fixture initialize result to advertise MCP support.
+      const write = handle.stdout.write.bind(handle.stdout);
+      handle.stdout.write = (chunk, ...rest) => {
+        const packet = JSON.parse(String(chunk));
+        if (packet.result?.protocolVersion === 1) packet.result.agentCapabilities = { mcpCapabilities: { http: true } };
+        return write(JSON.stringify(packet) + '\n', ...rest);
+      };
+      return handle;
+    };
+    const adapter = new AntigravityAcpAdapter({ ...f.config, toolPolicy }, f.runtime, () => {});
+    t.after(() => adapter.dispose());
+    const chunks = [];
+    const request = { provider: f.config.provider, model: 'server-default',
+      signal: AbortSignal.timeout(3000),
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'synthetic fixture' }] }],
+      ...(toolPolicy === 'bridge' ? { tools: [{ name: 'fixture_tool', description: 'fixture', parameters: { type: 'object' } }] } : {}),
+    };
+    await assert.rejects(async () => { for await (const chunk of adapter.stream(request)) chunks.push(chunk); },
+      (e) => e.code === 'CONTEXT_LENGTH_EXCEEDED');
+    assert.ok(f.calls.some((c) => c.method === 'session/cancel'));
+    assert.ok(!chunks.some((c) => c.type === 'usage'));
+  }
 });
