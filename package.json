@@ -66,6 +66,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "check:secrets": "node scripts/check-secrets.mjs",
     "test": "npm run build && node --test test/*.test.mjs",
     "check": "node ../dsh-go-repo/sdk/plugin-kit/bin/check.mjs . --load"
   },

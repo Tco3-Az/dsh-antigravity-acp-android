@@ -2,20 +2,21 @@
 
 DeepSeek Harness (DSH) 原生适配 Android 端 [dsh-go](https://github.com/ccch1mneyyy/dsh-go) 的 Google Antigravity ACP 插件。
 
-针对 Android 12+、PRoot Ubuntu 24.04、Termux Bionic 及 39 位用户虚拟地址空间（`CONFIG_ARM64_VA_BITS=39`）进行了全链路深度内核级与内存分配器级适配。
+面向 Android 12、PRoot Ubuntu 24.04 与 39 位用户虚拟地址空间（`CONFIG_ARM64_VA_BITS=39`）的兼容适配。官方服务端 1.3.0 已通过受限 QEMU 启动与 ACP 初始化验证；Android 真机会话与辅助进程仍需进一步验证，不能将模拟测试通过等同于完整移植成功。
 
 ---
 
 ## 核心特性
 
-- **TCMalloc VA35 严格空间隔离**：
-  - 针对 Android 39 位内核（512GB 用户空间上限，如华为鸿蒙/EMUI 等设备）进行物理分区。
-  - 将堆基址空间严格限制在 35 位（$< 32\text{ GB}$，掩码 `0x7ffffffff`），Tag 偏移置于 bit 35..37。
-  - 达成数学级零碰撞（$\text{Base} \ \& \ \text{Tag} \equiv 0$），Hint 上限严格控制在 $256\text{ GB} < 512\text{ GB}$，彻底消除 `AllocSlow OOM`、`Span CHECK` 与 `ReportCorruptedFree`。
+- **TCMalloc：39 位地址空间内使用 Tag35 布局**：
+  - 随机基址使用 bit 0..34（小于 32GiB），Tag 使用 bit 35..37，组合提示地址小于 256GiB，保留 512GiB 内核上界。
+  - 同步修正指针 Tag、释放掩码、guarded 分支，以及 `PageId = address >> 13` 的 Tag 提取（bit 22..24）、掩码和相邻比较常量。
+  - 旧版遗漏 PageId 路径，会使释放路由进入错误的分配器并破坏空闲链表；保留 `Span` 安全断言与 PageMap 几何，不通过 NOP 绕过校验。
+  - 支持原始 Tag42、实验 Tag39 与旧版不完整 Tag35 的迁移。Tag39 不适合作为最终布局：非零 Tag 会将 mmap 提示推到 512GiB 以上。
 - **PRoot `memfd` dlopen 绕过层 (`dlopen-shim.so`)**：
   - 拦截并物化 `_elfzipimport` 无法通过 `/proc/self/fd/N` 直接加载的 `.so` 动态库，自动落盘临时目录并安全执行 `dlopen`。
 - **Seccomp 与系统调用降级**：
-  - 就地修补官方 ARM64 二进制中的所有 `faccessat2`（Syscall 439）为兼容老旧内核与 PRoot 的 `faccessat`（Syscall 48）。
+  - 仅修补有 `svc #0` 或已验证 wrapper 上下文的 `faccessat2`（439）调用点至 `faccessat`（48）；不再把裸常量 439、JPEG/SVE 数组索引或调试行号误当成系统调用。此降级不模拟 faccessat2 的全部 flags 语义。
 - **运行期网络与进程沙箱护栏**：
   - 剥离 SOCKS/ALL_PROXY 干扰，强制回环路由 `NO_PROXY=127.0.0.1,localhost,::1`；
   - 强制使用 Go 原生纯代码 DNS 解析器（`GODEBUG=netdns=go`）；
@@ -46,27 +47,42 @@ dsh-antigravity-acp setup
 
 ---
 
-## 本地环境离线校验 (Local Verification)
+## 验证与当前边界
 
-为避免反复打包推送到真机测试，本项目提供完整的本地离线断言与仿真方案：
-
-### 1. 离线数学不变式检测（0.1 秒，推荐）
 ```bash
 npm test
+npm run check:secrets
 ```
-自动运行 6 项测试套件，通过数学位运算验证：
-- 基址掩码与 Tag 掩码零碰撞（`kBaseMask & kTagMask == 0`）；
-- 所有 Tag 组合 Hint 地址均 $< 512\text{ GB}$；
-- Span PageId index 严格小于 $2^{35}$（`kMaxPageIdBits`）；
-- 快速释放路径 dealloc 掩码对称性与就地平滑迁移幂等性。
 
-### 2. WSL2 / QEMU 用户态 39 位仿真（3 秒）
+`npm test` 先构建再执行回归，覆盖 PageId Tag 路由、原始／旧版迁移、重复执行幂等性、ELF 节区隔离、误匹配保护、大文件修补与 Mock ACP/OAuth。真实二进制集成测试默认跳过，可通过 `AGY_TEST_BINARY` 显式指定输入；测试只修改临时副本。
+
+### 官方服务端验证（2026-11-08）
+
+在专用 Ubuntu 24.04 aarch64 用户态测试环境中，使用 QEMU `-R 512G` 限制地址空间：
+
+- 真实服务端 1.3.0：完整补丁修改 `google_malloc` 的 334 条指令；第二次执行修改数为 0。
+- `--version`：成功退出并输出 `Build label: 1.3.0`，一次隔离重试约 45 秒；并发调试时曾超过 75 秒，不能承诺固定启动耗时。
+- 真实 ACP `initialize`：约 47 秒收到成功响应，`agentInfo.version = 1.3.0`；不是 Mock 响应。
+- 未执行用户登录、密钥配置或模型调用，未完成 Android 真机端到端验证。
+- `localharness_external` 及其嵌入 ELF 已纳入补丁；辅助进程在受限 QEMU 下仍触发 QEMU 自身的 `page_find_range_empty` 断言，**辅助进程功能尚未验证通过**。不限制地址空间时仅运行到缺少输入配置的 EOF，不能视为完整通过。
+
+在专用 Linux/WSL 环境中，使用自己的绝对路径运行；不要把测试指向个人默认发行版：
+
 ```bash
-# 在 WSL2 Debian 中限定 512GB (2^39) 虚拟地址空间运行测试
-wsl -d Debian qemu-aarch64-static -R 512G \
-  -E LD_PRELOAD=./bin/dlopen-shim.so \
-  ./agy_acp_server.par --uid=
+node lib/cli.js patch /path/to/agy_acp_server.par
+qemu-aarch64-static -R 512G \
+  -E LD_PRELOAD=/path/to/bin/dlopen-shim.so \
+  /path/to/agy_acp_server.par --version
 ```
+
+Android 安装缓存收据使用 `androidPatchRevision = 2`，旧收据会重新准备，避免把旧版残缺补丁当成就绪。预先打过任意范围替换／NOP 诊断补丁的文件，建议从官方压缩包重新提取后修补，不能假定所有历史误改均可逆。
+
+## 隐私与提交
+
+- 不要提交 `.env`、访问令牌、API key、OAuth 凭据、私钥或个人运行日志。
+- `npm run check:secrets` 检查 Git 跟踪文件与待提交的新文件，失败时只输出文件位置和类型，不打印匹配值。
+- 本地大型服务端、压缩包、测试日志与私密配置默认忽略；仅提交插件源码、构建产物、测试与公开文档。
+- 扫描是防误提交措施，不是“绝无敏感信息”的保证。若凭据曾发布，应撤销／轮换；删除工作区文件不会移除 Git 历史或聊天记录。
 
 ---
 
