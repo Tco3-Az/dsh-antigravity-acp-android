@@ -163,7 +163,7 @@ export async function apply(ctx: any, config: Partial<Config> = {}): Promise<voi
           let state = oauthManager.getState();
           if (!state.authUrl && adapter) {
             void adapter.client.login().catch(() => {});
-            await oauthManager.waitForAuthUrl(2500);
+            await oauthManager.waitForAuthUrl(10000);
             state = oauthManager.getState();
           }
           if (state.authUrl) {
