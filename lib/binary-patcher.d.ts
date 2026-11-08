@@ -21,7 +21,8 @@ export interface ByteRange {
 export declare function findGoogleMallocSections(buffer: Buffer): ByteRange[];
 /**
  * Patch TCMalloc instructions inside a buffer slice (scoped to google_malloc).
- * Translates tag operations to bits 39..41 and bounds hints to 2^38.
+ * Translates tag operations to bits 35..37 and bounds random base hints to 2^35 (32GB).
+ * Supports both pristine 48-bit binaries and migration from 39-bit / 38-bit patched versions.
  */
 export declare function patchTcmallocSlice(slice: Buffer, allowRaw64BitLiterals: boolean): {
     maskHits: number;

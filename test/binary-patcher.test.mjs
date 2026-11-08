@@ -78,21 +78,21 @@ test('ARM64 binary patcher synthetic ELF test', () => {
   assert.equal(buf.readUInt32LE(offsetMovX0Literal), 0xd2800600 >>> 0, 'Literal mov x0, #439 -> mov x0, #48');
   assert.equal(buf.readUInt32LE(offsetMovX8Canonical), 0xd2800608 >>> 0, 'Canonical mov x8, #439 -> mov x8, #48');
 
-  // TCMalloc constants rewritten to 39-bit layout
-  assert.equal(buf.readBigUInt64LE(offsetMask48), 0x38000000000n, '0x1c0000000000 -> 0x38000000000');
-  assert.equal(buf.readBigUInt64LE(offsetFree48), 0x008000000000n, '0x040000000000 -> 0x008000000000');
+  // TCMalloc constants rewritten to 35-bit layout (zero collision in 39-bit VA space)
+  assert.equal(buf.readBigUInt64LE(offsetMask48), 0x3800000000n, '0x1c0000000000 -> 0x3800000000');
+  assert.equal(buf.readBigUInt64LE(offsetFree48), 0x00800000000n, '0x040000000000 -> 0x00800000000');
   assert.equal(buf.readUInt32LE(offsetMmap), 0xd3596129 >>> 0, 'MmapAligned 1<<48 -> 1<<39');
-  assert.equal(buf.readUInt32LE(offsetAndPair), 0x92409508 >>> 0, '47-bit addr mask -> 38-bit addr mask');
-  assert.equal(buf.readUInt32LE(offsetAndPair + 4), 0x9256f109 >>> 0, '~(7<<42) -> ~(7<<39)');
-  assert.equal(buf.readUInt32LE(offsetMovzTag), 0xd2c04009 >>> 0, '4<<42 -> 4<<39');
+  assert.equal(buf.readUInt32LE(offsetAndPair), 0x92408908 >>> 0, '47-bit addr mask -> 35-bit addr mask (0x7ffffffff)');
+  assert.equal(buf.readUInt32LE(offsetAndPair + 4), 0x925af109 >>> 0, '~(7<<42) -> ~(7<<35)');
+  assert.equal(buf.readUInt32LE(offsetMovzTag), 0xd2c00409 >>> 0, '4<<42 -> 4<<35');
 
-  // TCMalloc ubfx rewritten to shift 39
+  // TCMalloc ubfx rewritten to shift 35
   const ubfxPatched = buf.readUInt32LE(offsetUbfx);
-  assert.equal((ubfxPatched & 0xfffffc00) >>> 0, 0xd367a400 >>> 0, 'ubfx #42, #3 -> ubfx #39, #3');
+  assert.equal((ubfxPatched & 0xfffffc00) >>> 0, 0xd3639400 >>> 0, 'ubfx #42, #3 -> ubfx #35, #3');
 
-  // TCMalloc lsl rewritten to shift 39
+  // TCMalloc lsl rewritten to shift 35
   const lslPatched = buf.readUInt32LE(offsetLsl);
-  assert.equal((lslPatched & 0xfffffc00) >>> 0, 0xd3596000 >>> 0, 'lsl #42 -> lsl #39');
+  assert.equal((lslPatched & 0xfffffc00) >>> 0, 0xd35d7000 >>> 0, 'lsl #42 -> lsl #35');
 
   // Verify zero collateral damage on all other offsets
   const targetRanges = [
@@ -151,4 +151,71 @@ test('Real binary patching verification if real binaries exist', async () => {
       assert.equal(secondRes.sha256Before, patchRes.sha256After);
     }
   }
+});
+
+test('TCMalloc VA35 mathematical invariants: zero collision, 512GB kernel bound, Span limit', () => {
+  const kBaseMask = 0x7ffffffffn; // 35 bits = 32GB (0x92408908)
+  const kTagShift = 35n;
+  const kTagMask = 0x3800000000n; // 7n << 35n (0x925d0800)
+  const kKernelBound = 1n << 39n; // 512GB (0xd3596129)
+  const kMaxPageIdBits = 35n;
+  const kPageShift = 13n; // 8KB pages in Google TCMalloc
+  const kMaxPageId = 1n << kMaxPageIdBits;
+
+  // Invariant 1: Zero collision between random base address space and Tag bits
+  assert.equal(
+    kBaseMask & kTagMask,
+    0n,
+    'Base address mask (0..34) and Tag mask (35..37) MUST NOT overlap (zero collision)'
+  );
+
+  // Invariant 2 & 3: All hints strictly within 512GB kernel bound and Span limit
+  for (let tag = 0n; tag <= 7n; tag++) {
+    const tagVal = tag << kTagShift;
+    const maxHint = kBaseMask | tagVal;
+
+    assert.ok(
+      maxHint < kKernelBound,
+      `Hint for tag ${tag} (0x${maxHint.toString(16)}) must be strictly < 512GB kernel bound`
+    );
+
+    const pageId = maxHint >> kPageShift;
+    assert.ok(
+      pageId < kMaxPageId,
+      `PageId index for tag ${tag} (0x${pageId.toString(16)}) must be strictly < 1 << 35 (Span limit)`
+    );
+  }
+
+  // Invariant 4: Fast-path deallocation mask symmetry
+  const tag4Val = 4n << kTagShift; // 0x2000000000n (bit 37)
+  const deallocMaskTag4 = 0xffffffa000000007n; // from 0xf2dff400 (movk x8, #0xffa0, lsl #32)
+  assert.equal(
+    tag4Val & deallocMaskTag4,
+    tag4Val,
+    'Tag 4 fast-path dealloc mask must match Tag 4 bit representation'
+  );
+
+  // Invariant 5: Migration idempotency from Tag 39 (commit ff06015)
+  const buf39 = Buffer.alloc(256);
+  // Plant Tag 39 patterns
+  buf39.writeUInt32LE(0x92409508 >>> 0, 0x10); // 38-bit mask
+  buf39.writeUInt32LE(0x9256f109 >>> 0, 0x14); // ~(7<<39)
+  buf39.writeUInt32LE(0xd2c04009 >>> 0, 0x20); // 4 << 39
+  buf39.writeUInt32LE(0xf2c04008 >>> 0, 0x24); // Tag 4 movk 39
+  buf39.writeUInt32LE(0xd367a400 >>> 0, 0x30); // ubfx #39, #3
+  buf39.writeUInt32LE(0xd3596000 >>> 0, 0x34); // lsl #39
+
+  const migRes = patchArm64Binary(buf39);
+  assert.equal(migRes.patched, true, 'Migration from Tag 39 must succeed');
+
+  assert.equal(buf39.readUInt32LE(0x10), 0x92408908 >>> 0, '38-bit -> 35-bit mask (0x7ffffffff)');
+  assert.equal(buf39.readUInt32LE(0x14), 0x925af109 >>> 0, '~(7<<39) -> ~(7<<35)');
+  assert.equal(buf39.readUInt32LE(0x20), 0xd2c00409 >>> 0, '4<<39 -> 4<<35');
+  assert.equal(buf39.readUInt32LE(0x24), 0xf2dff408 >>> 0, 'movk 39 -> movk 35');
+  assert.equal((buf39.readUInt32LE(0x30) & 0xfffffc00) >>> 0, 0xd3639400 >>> 0, 'ubfx #39 -> #35');
+  assert.equal((buf39.readUInt32LE(0x34) & 0xfffffc00) >>> 0, 0xd35d7000 >>> 0, 'lsl #39 -> #35');
+
+  // Second run must be idempotent
+  const migRes2 = patchArm64Binary(buf39);
+  assert.equal(migRes2.patched, false, 'Migration second run must be idempotent');
 });
